@@ -1,0 +1,10 @@
+ros2_ws/build/
+ros2_ws/install/
+ros2_ws/log/
+__pycache__/
+*.pyc
+.vscode/
+*.egg-info/
+
+# Local machine-specific config — must be copied from env/spot_isaac.env.template
+env/spot_isaac.env
