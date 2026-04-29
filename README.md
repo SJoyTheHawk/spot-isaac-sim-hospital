@@ -277,4 +277,5 @@ respective upstream licenses (NVIDIA Isaac Sim assets, Boston Dynamics Spot
 description).
 
 ## Sponsor Me (With Thanks)
-<iframe src="https://github.com/sponsors/SJoyTheHawk/card" title="Sponsor SJoyTheHawk" height="225" width="600" style="border: 0;"></iframe>
+
+[![Sponsor SJoyTheHawk](https://img.shields.io/badge/Sponsor-%E2%9D%A4-pink?logo=github)](https://github.com/sponsors/SJoyTheHawk)
