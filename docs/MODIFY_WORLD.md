@@ -8,13 +8,13 @@ The hospital USD scene (`isaac_hospital_scene_spot.usd`) ships with decorative l
 
 | Before | After |
 |--------|-------|
-| <img src="photos/scene_dark.png" width="600" title="Before: original scene with no active lights – very dark"/> | <img src="photos/scene_lit.png" width="600" title="After: scene with RectLights and DiskLights added"/> |
+| <img src="photos/world_modification/scene_dark.png" width="600" title="Before: original scene with no active lights – very dark"/> | <img src="photos/world_modification/scene_lit.png" width="600" title="After: scene with RectLights and DiskLights added"/> |
 
 ### Camera view (Spot robot perspective)
 
 | Before | After |
 |--------|-------|
-| <img src="photos/camera_angle_dark.png" width="600" title="Before: Spot robot camera view in the unlit scene"/> | <img src="photos/camera_angle_lit.png" width="600" title="After: Spot robot camera view with lighting enabled"/> |
+| <img src="photos/world_modification/camera_angle_dark.png" width="600" title="Before: Spot robot camera view in the unlit scene"/> | <img src="photos/world_modification/camera_angle_lit.png" width="600" title="After: Spot robot camera view with lighting enabled"/> |
 
 ---
 
@@ -65,7 +65,7 @@ All new lights are placed under the group prim:
 
 Each light prim is named **identically** to its corresponding fixture model prim.
 
-<img src="photos/light_group_prim.png" width="400" title="Isaac Sim Stage panel: Inhouse_Light group containing all added DiskLight and RectLight prims"/>
+<img src="photos/world_modification/light_group_prim.png" width="400" title="Isaac Sim Stage panel: Inhouse_Light group containing all added DiskLight and RectLight prims"/>
 
 ### 3.1 X-ray Light Box → `RectLight`
 
@@ -81,7 +81,7 @@ The `RectLight` is oriented so that it shines **back into** the light-box panel 
 
 Position: Slightly outward from lightbox's position, by 0.12m.
 
-<img src="photos/lightbox.png" width="900" title="RectLight placed at X-ray lightbox model positions"/>
+<img src="photos/world_modification/lightbox.png" width="900" title="RectLight placed at X-ray lightbox model positions"/>
 
 ### 3.2 Dome Light → `DiskLight`
 
@@ -94,7 +94,7 @@ The dome-light model's reference point is at its **centre**, so the `DiskLight` 
 | Exposure | 0.0 |
 | Radius | 0.5 m |
 
-<img src="photos/disklight_array.png" width="900" title="DiskLights placed at dome light model positions along the corridor ceiling (yellow circles = light gizmos)"/>
+<img src="photos/world_modification/disklight_array.png" width="900" title="DiskLights placed at dome light model positions along the corridor ceiling (yellow circles = light gizmos)"/>
 
 ### 3.3 Fluorescent Ceiling Light → `RectLight`
 
@@ -126,7 +126,7 @@ light_z = model_z + (-0.004m)   # slightly downward
 | Height | 0.88 m |
 | Width | 0.88 m |
 
-<img src="photos/rectlight_array.png" width="900" title="RectLights placed at fluorescent ceiling tile positions, offset by (-0.44, +0.44, -0.004) m from the model corner pivot"/>
+<img src="photos/world_modification/rectlight_array.png" width="900" title="RectLights placed at fluorescent ceiling tile positions, offset by (-0.44, +0.44, -0.004) m from the model corner pivot"/>
 
 ---
 
