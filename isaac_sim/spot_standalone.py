@@ -96,6 +96,9 @@ ENABLE_LEG_TF = False
 # unevenly and produce jittery sensor timestamps downstream.
 PHYSICS_NUM_THREADS = 8
 
+PHYSICS_DT = 1 / 500
+RENDERING_DT = 1 / 50
+
 # Body-mounted fisheye cameras (left/right/back). Each tuple is:
 #   (name, translation_xyz_m, rpy_rad, horizontal_fov_rad)
 FISHEYE_CAMERA_SPECS = [
@@ -194,7 +197,7 @@ def on_physics_step(step_size) -> None:
 # Increase PhysX CPU thread count (default is usually 4). 0 = use all cores.
 carb.settings.get_settings().set("/physics/numThreads", PHYSICS_NUM_THREADS)
 print(f"[spot_standalone] PhysX threads: {carb.settings.get_settings().get('/physics/numThreads')}")
-my_world = World(stage_units_in_meters=1.0, physics_dt=1 / 500, rendering_dt=1 / 50)
+my_world = World(stage_units_in_meters=1.0, physics_dt=PHYSICS_DT, rendering_dt=RENDERING_DT)
 assets_root_path = get_assets_root_path()
 if assets_root_path is None:
     carb.log_error("Could not find Isaac Sim assets folder")

@@ -1,3 +1,5 @@
+# Optimization In Progress
+
 # spot-isaac-lab-hospital
 
 Boston Dynamics **Spot** simulated in NVIDIA **Isaac Sim 5.1.0** inside a
@@ -273,3 +275,6 @@ instanced hospital reference), not inside `/World`.
 Apache-2.0. The Spot URDF and Isaac Sim assets are subject to their
 respective upstream licenses (NVIDIA Isaac Sim assets, Boston Dynamics Spot
 description).
+
+## Sponsor Me (With Thanks)
+<iframe src="https://github.com/sponsors/SJoyTheHawk/card" title="Sponsor SJoyTheHawk" height="225" width="600" style="border: 0;"></iframe>

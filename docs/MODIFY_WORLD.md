@@ -127,13 +127,3 @@ light_z = model_z + (-0.004m)   # slightly downward
 | Width | 0.88 m |
 
 <img src="photos/world_modification/rectlight_array.png" width="900" title="RectLights placed at fluorescent ceiling tile positions, offset by (-0.44, +0.44, -0.004) m from the model corner pivot"/>
-
----
-
-## File Reference
-
-| File | Description |
-|------|-------------|
-| `assets/scene_all.txt` | Full prim dump – type, position, quaternion, RPY, USD path |
-| `scripts/dump_scene_positions.py` | Script used to generate `scene_all.txt` |
-| `assets/isaac_hospital_scene_spot.usd` | USD scene (modified with extra lights) |
