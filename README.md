@@ -6,7 +6,7 @@ navigation, perception and control.
 
 The package ships:
 
-- a custom hospital USD world with extra lighting added (see [`assets/README.md`](assets/README.md))
+- a custom hospital USD world with extra lighting added (see [`docs/MODIFY_WORLD.md`](docs/MODIFY_WORLD.md))
 - a Spot robot with the sensors needed for ROS 2 navigation already attached in the initial stage
 - a standalone Isaac Sim driver script that boots the scene, runs the locomotion policy and bridges sensors / `cmd_vel` to ROS 2
 
@@ -211,7 +211,7 @@ For details about `scripts/run_isaac.sh` and `isaac_sim/spot_standalone.py`, see
 
 ---
 
-## Repository layout
+## Repository layout (pending to change)
 
 ```
 .
