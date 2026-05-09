@@ -9,8 +9,10 @@ navigation, perception and control.
 The package ships:
 
 - a custom hospital USD world with extra lighting added (see [`docs/MODIFY_WORLD.md`](docs/MODIFY_WORLD.md))
+- a character-enabled hospital USD with manually placed chair / wheelchair prims used by seated people scenarios
 - a Spot robot with the sensors needed for ROS 2 navigation already attached in the initial stage
 - a standalone Isaac Sim driver script that boots the scene, runs the locomotion policy and bridges sensors / `cmd_vel` to ROS 2
+- a standalone Isaac Sim people-control test UI driven by YAML scenarios
 
 The robot is driven by Isaac Sim's `SpotFlatTerrainPolicy` (RL locomotion
 policy) and accepts `/cmd_vel` (Twist or TwistStamped) from any ROS 2
@@ -21,10 +23,12 @@ controller — Nav2, `teleop_twist_keyboard`, custom planners, etc.
 ## Why Isaac Sim instead of Gazebo?
 
 Gazebo is easy to set up but its physics is approximate. Isaac Sim provides
-photorealistic rendering and an accurate physics world, at the cost of
-needing a more powerful machine (GPU required) and a smaller community
-making troubleshooting harder. This repo aims to lower that barrier by
-shipping a working hospital + Spot setup out of the box.
+photorealistic rendering, an accurate physics world, a larger library of
+simulation-ready assets, and finer control over character movement in the
+scene. The tradeoff is that Isaac Sim needs a more powerful machine (GPU
+required) and has a smaller community, which can make troubleshooting harder.
+This repo aims to lower that barrier by shipping a working hospital + Spot
+setup out of the box.
 
 ---
 
@@ -38,7 +42,8 @@ shipping a working hospital + Spot setup out of the box.
   <https://docs.ros.org/en/jazzy/Installation/Ubuntu-Install-Debs.html>
 - ROS 2 dependencies:
   ```bash
-  sudo apt install ros-jazzy-nav2-bringup ros-jazzy-robot-state-publisher
+  sudo apt install ros-jazzy-nav2-bringup ros-jazzy-robot-state-publisher \
+      ros-jazzy-teleop-twist-keyboard ros-jazzy-rqt-robot-steering
   ```
 
 After installing Isaac Sim, verify it from the App Selector. From the Isaac
@@ -126,11 +131,119 @@ ros2 topic pub --once /cmd_vel geometry_msgs/msg/TwistStamped \
     "{header: {frame_id: base_link}, twist: {linear: {x: 0.5}}}"
 ```
 
+For a GUI velocity controller, run `rqt_robot_steering` and point it at the
+same `/cmd_vel` topic:
+
+```bash
+source /opt/ros/jazzy/setup.bash
+ros2 run rqt_robot_steering rqt_robot_steering
+```
+
+### Character-control scene
+
+The character test scene is stored separately from the default Spot runtime:
+
+- USD: `assets/isaac_hospital_scene_spot_w_characters.usd`
+- character assets: `assets/characters/`
+- UI / scenario file: `assets/people_initial_commands.yaml`
+- runtime command placeholder: `assets/people_runtime_commands.txt`
+
+Launch it with:
+
+```bash
+./scripts/run_people_sim.sh
+```
+
+This opens the hospital scene with saved characters under `/World/Characters`,
+bakes an Isaac Sim people navmesh, attaches the animation graph / behavior
+scripts, and opens a small **People Control Test** window. The window lets you
+select one character, enter `X`, `Y`, and `Yaw`, then trigger scenarios from
+the YAML-defined buttons. Current examples include initialization, patrols,
+seated people, talking pairs, look-around actions, and selected-character
+`GoTo`.
+
+The scene also contains manually added chair and wheelchair prims under
+`/World/Chair`. These are intentional: seated character commands need stable
+seat target prim paths such as `/World/Chair/SM_Chair_01a13`. Keep these
+documented with the character scene because they are part of the scenario
+authoring surface, not only visual decoration.
+
+---
+
+## Character Scenario Markup
+
+`assets/people_initial_commands.yaml` is a small markup layer over
+`omni.anim.people` command strings. It has two top-level keys:
+
+- `buttons`: up to 9 UI buttons. Each button can provide `label`, `scenario`,
+  and optional `action` (`reset` or `stop`).
+- `scenarios`: named scenario definitions referenced by the buttons.
+
+The underlying command-line format is:
+
+```text
+<character_name> <action> <arguments...> <duration_or_yaw>
+```
+
+Examples:
+
+```text
+Female_patient_05 Idle 9999
+Female_visitor_04 LookAround 9999
+Female_police_01 GoTo 19.2 30.89 0.0 0.0
+Female_visitor_02 Sit /World/Chair/SM_Chair_02a7_01 9999
+Male_nurse_04 Talk Male_nurse_02 9999
+Female_nurse_05 TalkWith Male_patient_05 9999
+```
+
+Supported scenario nodes:
+
+| Node type | YAML keys | Purpose |
+| --------- | --------- | ------- |
+| `command` | `command` | Run one people command for one character |
+| `commands` | `commands` | Run a list of command strings, grouped by character |
+| `wait` | `seconds` or `duration` | Pause a sequence before the next step |
+| `sequence` | `steps` | Run child nodes in order |
+| `parallel` | `children` | Run child scenario branches together |
+| `repeat` | `count`, plus `steps`, `commands`, `command`, or `child` | Repeat a plan; `inf`, `infinite`, `forever`, or `0` mean endless |
+
+Scenarios can target specific characters with a `characters` mapping:
+
+```yaml
+scenarios:
+  set_patrol:
+    label: "Set patrol"
+    characters:
+      Female_police_01:
+        type: repeat
+        count: inf
+        steps:
+          - type: command
+            command: "Female_police_01 GoTo 19.2 30.89 0.0 0.0"
+          - type: command
+            command: "Female_police_01 GoTo 17.5 3.19 0.0 180.0"
+```
+
+The UI-selected character and target pose are available as template variables:
+`{character}`, `{x}`, `{y}`, and `{r}`.
+
+```yaml
+selected_goto:
+  label: "GoTo"
+  characters:
+    "{character}":
+      type: command
+      command: "{character} GoTo {x} {y} 0.0 {r}"
+```
+
+Use long durations such as `9999` for persistent idle, sit, talk, or
+look-around states.
+
 ---
 
 ## ROS 2 Topics
 
-Once `run_isaac.sh` is running, you can see the ROS2 topics and tf tree:
+Once `run_isaac.sh` is running, you can see the ROS 2 topics and tf tree:
 
 | Direction | Topic                          | Type                              |
 | --------- | ------------------------------ | --------------------------------- |
@@ -213,7 +326,7 @@ For details about `scripts/run_isaac.sh` and `isaac_sim/spot_standalone.py`, see
 
 ---
 
-## Repository layout (pending to change)
+## Repository layout
 
 ```
 .
@@ -222,10 +335,13 @@ For details about `scripts/run_isaac.sh` and `isaac_sim/spot_standalone.py`, see
 │   ├── list_graphs.py          # debug: dump all OmniGraph nodes
 │   ├── rtx_lidar.py            # debug: RTX lidar prim helper
 │   └── export_tf_pose.py       # debug: dump TF tree for sanity-checking
-├── assets/                     # USD scenes + lighting docs
+├── assets/                     # USD scenes, character assets and command configs
 │   ├── isaac_hospital_scene_spot.usd
-│   ├── scene_all.txt           # full prim dump
-│   └── README.md               # lighting modification guide
+│   ├── isaac_hospital_scene_spot_w_characters.usd
+│   ├── people_initial_commands.yaml
+│   ├── people_runtime_commands.txt
+│   ├── characters/
+│   └── scene_positions.txt     # prim pose dump for world editing
 ├── ros2_ws/src/spot_hospital_bringup/
 │   ├── urdf/spot.urdf          # Spot URDF (used by robot_state_publisher)
 │   ├── maps/                   # Nav2 occupancy map (.yaml + .png)
@@ -233,6 +349,7 @@ For details about `scripts/run_isaac.sh` and `isaac_sim/spot_standalone.py`, see
 ├── scripts/
 │   ├── run_isaac.sh            # launch Isaac Sim with the standalone script
 │   ├── run_ros2.sh             # launch robot_state_publisher
+│   ├── run_people_test.sh      # launch the character-control scene and UI
 │   └── dump_scene_positions.py # dump prim poses to /tmp/scene_positions.txt
 ├── docs/photos/                # screenshots used in this README
 └── env/
@@ -241,12 +358,21 @@ For details about `scripts/run_isaac.sh` and `isaac_sim/spot_standalone.py`, see
 
 ---
 
-## Nav2
+## Supporting Nav2 / RViz Demos
 
-The package ships an occupancy map at
-`ros2_ws/src/spot_hospital_bringup/maps/spot_hospital_map.{yaml,png}`. Launch
-a Nav2 stack against it with `use_sim_time:=true` and AMCL/SLAM consuming
-`/point_cloud` (or via a `pointcloud_to_laserscan` adapter).
+Nav2 is included as a validation and demo path rather than the core function
+of this package. The package ships an occupancy map at
+`ros2_ws/src/spot_hospital_bringup/maps/spot_hospital_map.{yaml,png}`. You can
+launch a Nav2 stack against it with `use_sim_time:=true` and AMCL/SLAM
+consuming `/point_cloud` (or via a `pointcloud_to_laserscan` adapter).
+
+For simpler robot-control demos, use direct `/cmd_vel` input from
+`teleop_twist_keyboard`, `rqt_robot_steering`, or a custom ROS 2 node. RViz2 is
+useful for showing the costmap, TF tree, raw point cloud, RealSense color /
+depth point cloud, and the camera streams while the robot moves through the
+front desk area.
+
+<img src="ros2_ws/src/spot_hospital_bringup/maps/spot_hospital_map.png" width="800" title="Nav2 occupancy map of the hospital environment"/>
 
 ---
 
@@ -267,6 +393,18 @@ leg TFs by default. Keep `ENABLE_LEG_TF = False` and let
 **"Authoring to instance proxy not allowed"** — when adding lights or other
 prims, write them under `/World/hospital/Inhouse_Light/` (outside the
 instanced hospital reference), not inside `/World`.
+
+---
+
+## Media To Add
+
+- [ ] raw point cloud screenshot / capture
+- [ ] images from the four RGB camera streams
+- [ ] RealSense color and depth point cloud in RViz2
+- [ ] Isaac Sim GIF of guards patrolling and people waving / talking
+- [ ] RViz2 costmap screenshot
+- [ ] GIF of `/cmd_vel` robot control with `rqt_robot_steering`
+- [ ] GIF of Nav2 navigating through the front desk area
 
 ---
 

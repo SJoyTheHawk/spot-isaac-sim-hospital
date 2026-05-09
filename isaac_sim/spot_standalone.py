@@ -84,7 +84,7 @@ SENSOR_IMU_TRANS = (0.0, 0.0, 0.0)
 SENSOR_IMU_RPY = (0.0, 0.0, 0.0)
 
 # Feature toggles
-ENABLE_FISHEYE_CAMERAS = False
+ENABLE_FISHEYE_CAMERAS = True
 ENABLE_REALSENSE = False
 # Publish leg-link TFs from Isaac Sim. Set False when an external
 # robot_state_publisher with the Spot URDF is running, otherwise the two will
@@ -120,7 +120,7 @@ TOPIC_IMU                = "imu/data"
 TOPIC_TF_STATIC          = "tf_static"
 TOPIC_ISAAC_JOINT_STATES = "isaac_joint_states"
 TOPIC_JOINT_STATES       = "joint_states"
-TOPIC_FRONT_CAMERA_IMAGE = "front_camera/image"
+TOPIC_FRONT_CAMERA_IMAGE = "camera/rgb/image_raw"
 TOPIC_REALSENSE_COLOR    = "realsense/camera"
 TOPIC_REALSENSE_DEPTH    = "realsense/depth/points"
 TOPIC_CMD_VEL            = "cmd_vel"

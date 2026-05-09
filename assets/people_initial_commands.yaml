@@ -1,0 +1,272 @@
+buttons:
+  - label: "Initialize"
+    action: "reset"
+    scenario: "initialize"
+
+  - label: "GoTo"
+    scenario: "selected_goto"
+
+  - label: "Look Around"
+    scenario: "look_around"
+
+  - label: "Set patrol"
+    scenario: "set_patrol"
+
+  - label: "Set Sit"
+    scenario: "set_sit"
+
+  - label: "Set Talk"
+    scenario: "set_talk"
+
+  - label: "-"
+
+  - label: "-"
+
+  - label: "Reset"
+    action: "reset"
+    scenario: "idle_all"
+
+scenarios:
+  initialize:
+    label: "Initialize characters"
+    type: commands
+    characters:
+      Female_visitor_02:
+        type: command
+        command: "Female_visitor_02 Sit /World/Chair/SM_Chair_02a7_01 9999"
+      Male_visitor_02:
+        type: command
+        command: "Male_visitor_02 Sit /World/Chair/SM_Chair_02a7_03 9999"
+      Male_visitor_01:
+        type: command
+        command: "Male_visitor_01 Sit /World/Chair/SM_Chair_02a4_03 9999"
+      Female_nurse_02:
+        type: command
+        command: "Female_nurse_02 Sit /World/Chair/SM_Chair_01a13 9999"
+      Male_patient_05:
+        type: command
+        command: "Male_patient_05 Sit /World/Chair/SM_Chair_01a12 9999"
+      Male_patient_01:
+        type: command
+        command : "Male_patient_01 Sit /World/Chair/SM_Chair_01a3 9999"
+      Female_visitor_03:
+        type: command
+        command: "Female_visitor_03 Sit /World/Chair/SM_Chair_01a5 9999"
+      Male_patient_04:
+        type: command
+        command: "Male_patient_04 Sit /World/Chair/SM_WheelChair_01a4 9999"
+      Female_patient_05:
+        type: command
+        command: "Female_patient_05 Sit /World/Chair/SM_Chair_01a7 9999"
+      Male_nurse_04:
+        type: command
+        command: "Male_nurse_04 Talk Male_nurse_02 9999"
+      Female_nurse_05:
+        type: command
+        command: "Female_nurse_05 TalkWith Male_patient_05 9999"
+      Male_nurse_05:
+        type: command
+        command: "Male_nurse_05 TalkWith Female_patient_05 9999"
+      Female_visitor_04:
+        type: command
+        command: "Female_visitor_04 LookAround 9999"
+      Female_nurse_04:
+        type: repeat
+        count: inf
+        steps:
+          - type: command
+            command: "Female_nurse_04 Sit /World/Chair/SM_Chair_04a2_88 10"
+          - type: command
+            command: "Female_nurse_04 Idle 10"
+      Female_police_01:
+        type: repeat
+        count: inf
+        steps:
+          - type: command
+            command: "Female_police_01 GoTo 19.2 30.89 0.0 0.0"
+          - type: command
+            command: "Female_police_01 GoTo 17.5 3.19 0.0 180.0"
+      Female_patient_02:
+        type: repeat
+        count: inf
+        steps:
+          - type: command
+            command: "Female_patient_02 GoTo 6.53459 17.05795 0.0 90.0"
+          - type: wait
+            seconds: 60
+          - type: command
+            command: "Female_patient_02 GoTo 6.89391 5.64066 0.0 -90.0"
+          - type: wait
+            seconds: 20
+      Male_police_01:
+        type: repeat
+        count: inf
+        steps:
+          - type: command
+            command: "Male_police_01 GoTo -28.4 4.2 0.0 180.0"
+          - type: command
+            command: "Male_police_01 GoTo -25.8 10.1 0.0 90"
+          - type: command
+            command: "Male_police_01 GoTo 5.0 10.1 0.0 0.0"
+          - type: command
+            command: "Male_police_01 GoTo 6.7 0.0 0.0 -90.0"
+          - type: command
+            command: "Male_police_01 GoTo -2.3 1.91 0.0 -90.0"
+      Male_patient_02:
+        type: repeat
+        count: inf
+        steps:
+          - type: command
+            command: "Male_patient_02 GoTo -32.6271 3.23897 0.0 -90.0"
+          - type: command
+            command: "Male_patient_02 LookAround 60"
+          - type: command
+            command: "Male_patient_02 GoTo -3.99849 11.27831 0.0 90.0"
+          - type: command
+            command: "Male_patient_02 LookAround 60"
+      Female_patient_04:
+        type: repeat
+        count: inf
+        steps:
+          - type: command
+            command: "Female_patient_04 GoTo -41.11112 28.52735 0.0 0.0"
+          - type: command
+            command: "Female_patient_04 GoTo -39.84272 13.08673 0.0 90.0"
+          - type: command
+            command: "Female_patient_04 GoTo -25.59104 4.74649 0.0 90.0"
+          - type: command
+            command: "Female_patient_04 GoTo -10.54612 0.84 0.0 90.0"
+          - type: command
+            command: "Female_patient_04 LookAround 10"
+          - type: command
+            command: "Female_patient_04 GoTo -39.84272 13.08673 0.0 180.0"
+
+  idle_all:
+    label: "Reset all characters to idle"
+    type: commands
+    commands:
+      - "Female_nurse_01 Idle 9999"
+      - "Female_nurse_02 Idle 9999"
+      - "Female_nurse_03 Idle 9999"
+      - "Female_nurse_04 Idle 9999"
+      - "Female_nurse_05 Idle 9999"
+      - "Female_patient_01 Idle 9999"
+      - "Female_patient_02 Idle 9999"
+      - "Female_patient_03 Idle 9999"
+      - "Female_patient_04 Idle 9999"
+      - "Female_patient_05 Idle 9999"
+      - "Female_police_01 Idle 9999"
+      - "Female_visitor_01 Idle 9999"
+      - "Female_visitor_02 Idle 9999"
+      - "Female_visitor_03 Idle 9999"
+      - "Female_visitor_04 Idle 9999"
+      - "Male_nurse_01 Idle 9999"
+      - "Male_nurse_02 Idle 9999"
+      - "Male_nurse_03 Idle 9999"
+      - "Male_nurse_04 Idle 9999"
+      - "Male_nurse_05 Idle 9999"
+      - "Male_patient_01 Idle 9999"
+      - "Male_patient_02 Idle 9999"
+      - "Male_patient_03 Idle 9999"
+      - "Male_patient_04 Idle 9999"
+      - "Male_patient_05 Idle 9999"
+      - "Male_police_01 Idle 9999"
+      - "Male_visitor_01 Idle 9999"
+      - "Male_visitor_02 Idle 9999"
+
+  set_patrol:
+    label: "Set patrol"
+    characters:
+      Female_police_01:
+        type: repeat
+        count: inf
+        steps:
+          - type: command
+            command: "Female_police_01 GoTo 19.2 30.89 0.0 0.0"
+          - type: command
+            command: "Female_police_01 GoTo 17.5 3.19 0.0 180.0"
+
+      Male_police_01:
+        type: repeat
+        count: inf
+        steps:
+          - type: command
+            command: "Male_police_01 GoTo -28.4 4.2 0.0 180.0"
+          - type: command
+            command: "Male_police_01 GoTo -25.8 10.1 0.0 90"
+          - type: command
+            command: "Male_police_01 GoTo 5.0 10.1 0.0 0.0"
+          - type: command
+            command: "Male_police_01 GoTo 6.7 0.0 0.0 -90.0"
+          - type: command
+            command: "Male_police_01 GoTo -2.3 1.91 0.0 -90.0"
+  
+  set_sit:
+    label: "Set Sit"
+    type: commands
+    commands:
+      - "Female_visitor_02 Sit /World/Chair/SM_Chair_02a7_01 9999"
+      - "Male_visitor_02 Sit /World/Chair/SM_Chair_02a7_03 9999"
+      - "Male_visitor_01 Sit /World/Chair/SM_Chair_02a4_03 9999"
+      - "Female_nurse_02 Sit /World/Chair/SM_Chair_01a13 9999"
+      - "Male_patient_05 Sit /World/Chair/SM_Chair_01a12 9999"
+      - "Male_patient_01 Sit /World/Chair/SM_Chair_01a3 9999"
+      - "Female_visitor_03 Sit /World/Chair/SM_Chair_01a5 9999"
+      - "Male_patient_04 Sit /World/Chair/SM_WheelChair_01a4 9999"
+      - "Female_patient_05 Sit /World/Chair/SM_Chair_01a7 9999"
+
+  set_talk:
+    label: "Set Talk"
+    type: commands
+    commands:
+      - "Male_nurse_04 Talk Male_nurse_02 9999"
+      - "Female_nurse_05 Talk Male_patient_05 9999"
+      - "Male_nurse_05 TalkWith Female_patient_05 9999"
+
+  selected_goto:
+    label: "GoTo"
+    characters:
+      "{character}":
+        type: command
+        command: "{character} GoTo {x} {y} 0.0 {r}"
+
+  look_around:
+    label: "Look Around"
+    type: commands
+    commands:
+      - "Male_patient_01 LookAround 9999"
+      - "Female_nurse_02 LookAround 9999"
+      - "Female_patient_05 LookAround 9999"
+      - "Male_patient_05 LookAround 9999"
+      - "Female_visitor_02 LookAround 9999"
+      - "Male_visitor_02 LookAround 9999"
+      - "Male_visitor_01 LookAround 9999"
+      - "Male_patient_04 LookAround 9999"
+
+  # Add more scenario entries here, for example:
+  # patient_walk_and_fall:
+  #   label: "Patient Fall"
+  #   characters:
+  #     Male_patient_01:
+  #       type: sequence
+  #       steps:
+  #         - type: command
+  #           command: "Male_patient_01 GoTo {x} {y} 0.0 _"
+  #         - type: command
+  #           command: "Male_patient_01 Fall 10"
+  #
+  # nurse_front_desk_loop:
+  #   label: "Front Desk Loop"
+  #   characters:
+  #     Female_nurse_01:
+  #       type: repeat
+  #       count: inf
+  #       steps:
+  #         - type: command
+  #           command: "Female_nurse_01 Stand 10"
+  #         - type: wait
+  #           seconds: 10
+  #         - type: command
+  #           command: "Female_nurse_01 Sit /World/PeopleTestSeatTargets/SM_Chair_01a1 10"
+  #         - type: wait
+  #           seconds: 10
