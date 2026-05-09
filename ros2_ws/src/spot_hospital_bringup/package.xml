@@ -1,7 +1,7 @@
 <?xml version="1.0"?>
 <package format="3">
   <name>spot_hospital_bringup</name>
-  <version>0.1.0</version>
+  <version>2.0.0</version>
   <description>Launch, URDF, and map files for Spot in the Isaac Sim hospital scene.</description>
   <maintainer email="rockyroadstudio@outlook.com">S.Joy</maintainer>
   <author email="rockyroadstudio@outlook.com">S.Joy — Rocky Road Studio (https://rockyroad.studio)</author>

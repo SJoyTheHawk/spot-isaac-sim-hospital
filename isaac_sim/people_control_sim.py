@@ -26,7 +26,10 @@ COMMANDS_YAML_FILE = os.path.realpath(
     os.environ.get("PEOPLE_INITIAL_COMMANDS", os.path.join(REPO_DIR, "assets", "people_initial_commands.yaml"))
 )
 PEOPLE_COMMAND_FILE = os.path.realpath(
-    os.environ.get("PEOPLE_COMMAND_FILE", os.path.join(REPO_DIR, "assets", "people_runtime_commands.txt"))
+    os.environ.get("PEOPLE_COMMAND_FILE", os.path.join("/tmp", "spot_isaac_people_runtime_commands.txt"))
+)
+PEOPLE_COMMAND_FILE_IS_DEFAULT = PEOPLE_COMMAND_FILE == os.path.realpath(
+    os.path.join("/tmp", "spot_isaac_people_runtime_commands.txt")
 )
 CHARACTER_ROOT = "/World/Characters"
 SEAT_PROXY_ROOT = "/World/PeopleTestSeatTargets"
@@ -79,7 +82,17 @@ def strip_nested_rigid_bodies() -> None:
                 prim.GetAttribute("physics:rigidBodyEnabled").Set(False)
 
 
+def ensure_people_command_file() -> None:
+    if not PEOPLE_COMMAND_FILE or "://" in PEOPLE_COMMAND_FILE:
+        return
+    os.makedirs(os.path.dirname(PEOPLE_COMMAND_FILE), exist_ok=True)
+    mode = "w" if PEOPLE_COMMAND_FILE_IS_DEFAULT else "a"
+    with open(PEOPLE_COMMAND_FILE, mode, encoding="utf-8"):
+        pass
+
+
 def configure_people() -> None:
+    ensure_people_command_file()
     settings = carb.settings.get_settings()
     settings.set("/persistent/exts/omni.anim.people/character_prim_path", CHARACTER_ROOT)
     settings.set("/exts/isaacsim.replicator.agent/characters_parent_prim_path", CHARACTER_ROOT)

@@ -1,10 +1,12 @@
-# Optimization In Progress
-
 # spot-isaac-lab-hospital
+
+**Version 2.0**
 
 Boston Dynamics **Spot** simulated in NVIDIA **Isaac Sim 5.1.0** inside a
 custom hospital environment, with a full **ROS 2 Jazzy** interface for
 navigation, perception and control.
+
+Release notes are tracked in [`CHANGELOG.md`](CHANGELOG.md).
 
 The package ships:
 
@@ -13,6 +15,7 @@ The package ships:
 - a Spot robot with the sensors needed for ROS 2 navigation already attached in the initial stage
 - a standalone Isaac Sim driver script that boots the scene, runs the locomotion policy and bridges sensors / `cmd_vel` to ROS 2
 - a standalone Isaac Sim people-control test UI driven by YAML scenarios
+- a combined Spot + people Isaac Sim bridge that uses the people-control scene as the base stage and adds Spot's ROS 2 bridge on top
 
 The robot is driven by Isaac Sim's `SpotFlatTerrainPolicy` (RL locomotion
 policy) and accepts `/cmd_vel` (Twist or TwistStamped) from any ROS 2
@@ -85,13 +88,39 @@ The hospital USD path is resolved by `scripts/run_isaac.sh` in this order:
 1. `HOSPITAL_USD` env var (set in `env/spot_isaac.env`)
 2. `assets/isaac_hospital_scene_spot.usd` inside the repo (default)
 
+The combined Spot + people bridge resolves its stage from `SPOT_PEOPLE_USD`,
+then falls back to `assets/isaac_hospital_scene_spot_w_characters.usd`.
+
 So a fresh clone runs without editing any absolute path.
 
 ---
 
 ## Operation
 
-### Terminal 1 — Isaac Sim + sensor publishers
+### Option A — Spot + People Bridge (recommended for v2.0)
+
+```bash
+./scripts/run_spot_bridge_with_people.sh
+```
+
+This launches one Isaac Sim app with the character-enabled hospital USD,
+registers saved people under `/World/Characters`, opens the **People Control
+Test** window, then enables the ROS 2 bridge for Spot. Use this mode when you
+want robot sensors, `/cmd_vel`, `/clock`, `/odom`, `/tf`, and animated people
+in the same simulation.
+
+The combined bridge is implemented in
+[`isaac_sim/spot_bridge_with_people.py`](isaac_sim/spot_bridge_with_people.py).
+It is intentionally self-contained and does not import the standalone Spot or
+people scripts at runtime.
+
+People scenario captures:
+
+- [Initialize people](docs/initialize_people.mp4)
+- [People feature demo 1](docs/people_feature_1.mp4)
+- [People feature demo 2](docs/people_feature_2.mp4)
+
+### Option B — Spot only
 
 ```bash
 ./scripts/run_isaac.sh
@@ -102,7 +131,7 @@ world to see the Spot robot.
 
 <img src="docs/photos/main_readme/robot_with_sensors.png" width="800" title="Spot robot in initial stage — 3D LiDAR (top blue cylinder) + RGB camera, IMU, RealSense and fisheye sensors attached"/>
 
-### Terminal 2 — `robot_state_publisher` (URDF → TF) *(optional)*
+### Optional — `robot_state_publisher` (URDF → TF)
 
 ```bash
 source /opt/ros/jazzy/setup.bash
@@ -113,7 +142,7 @@ ros2 launch spot_hospital_bringup robot_state_publisher.launch.py
 This publishes the dynamic leg-link TFs (`body → fl_hip → fl_uleg → ...`)
 from the `/joint_states` topic emitted by Isaac.
 
-### Terminal 3 — drive the robot
+### Drive the robot
 
 Teleop (keyboard):
 
@@ -139,14 +168,14 @@ source /opt/ros/jazzy/setup.bash
 ros2 run rqt_robot_steering rqt_robot_steering
 ```
 
-### Character-control scene
+### Option C — People only
 
-The character test scene is stored separately from the default Spot runtime:
+The character test scene can also run without Spot or ROS 2:
 
 - USD: `assets/isaac_hospital_scene_spot_w_characters.usd`
 - character assets: `assets/characters/`
 - UI / scenario file: `assets/people_initial_commands.yaml`
-- runtime command placeholder: `assets/people_runtime_commands.txt`
+- runtime command scratch file: `/tmp/spot_isaac_people_runtime_commands.txt`
 
 Launch it with:
 
@@ -243,7 +272,8 @@ look-around states.
 
 ## ROS 2 Topics
 
-Once `run_isaac.sh` is running, you can see the ROS 2 topics and tf tree:
+Once `run_isaac.sh` or `run_spot_bridge_with_people.sh` is running, you can
+see the ROS 2 topics and TF tree:
 
 | Direction | Topic                          | Type                              |
 | --------- | ------------------------------ | --------------------------------- |
@@ -259,6 +289,33 @@ Once `run_isaac.sh` is running, you can see the ROS 2 topics and tf tree:
 | pub       | `/joint_states`                | `sensor_msgs/JointState` (URDF)   |
 | pub       | `/tf`, `/tf_static`            | `tf2_msgs/TFMessage`              |
 | sub       | `/cmd_vel`                     | `geometry_msgs/TwistStamped`      |
+
+When RealSense is enabled, the color image and depth point cloud use the
+actual discovered USD camera prim frame IDs. In the current scene, the depth
+point cloud is typically published in `Camera_Pseudo_Depth`, not the generic
+`realsense` mount frame. This avoids the 90-degree roll mismatch that happens
+when a camera optical point cloud is visualized against a body-style mount TF.
+
+### ROS / RViz captures
+
+<img src="docs/photos/ros_topic/realsense_topic_rviz.png" width="800" title="RealSense color image and depth point cloud in RViz2"/>
+
+<img src="docs/photos/ros_topic/costmap.png" width="800" title="RViz2 costmap for the hospital Nav2 setup"/>
+
+[Point cloud RViz video](docs/photos/ros_topic/point_cloud_rviz.mp4)
+
+### Camera streams
+
+<table>
+  <tr>
+    <td><img src="docs/photos/ros_topic/front_camera.png" width="390" title="Front camera topic in RViz2"/></td>
+    <td><img src="docs/photos/ros_topic/left_fisheye_camera.png" width="390" title="Left fisheye camera topic in RViz2"/></td>
+  </tr>
+  <tr>
+    <td><img src="docs/photos/ros_topic/right_fisheye_camera.png" width="390" title="Right fisheye camera topic in RViz2"/></td>
+    <td><img src="docs/photos/ros_topic/rear_fisheye_camera.png" width="390" title="Rear fisheye camera topic in RViz2"/></td>
+  </tr>
+</table>
 
 ### TF tree
 
@@ -307,8 +364,11 @@ The extra light setup is documented separately in
 
 ## Configuration
 
-Most parameters are at the top of
-[`isaac_sim/spot_standalone.py`](isaac_sim/spot_standalone.py):
+Most Spot-only parameters are at the top of
+[`isaac_sim/spot_standalone.py`](isaac_sim/spot_standalone.py). The combined
+Spot + people bridge mirrors the same Spot settings in
+[`isaac_sim/spot_bridge_with_people.py`](isaac_sim/spot_bridge_with_people.py)
+and adds people setup before the ROS 2 bridge is enabled:
 
 | Variable                    | Type   | Purpose                                      |
 | --------------------------- | ------ | -------------------------------------------- |
@@ -320,7 +380,8 @@ Most parameters are at the top of
 | `ENABLE_LEG_TF`             | `bool` | Publish leg TFs from Isaac (off by default)  |
 | `SENSOR_(SENSOR_NAME)_TRANS` / `_RPY` | `tuple` | TF mounts for laser, front cam, IMU, etc. |
 
-For details about `scripts/run_isaac.sh` and `isaac_sim/spot_standalone.py`, see [`docs/RUN_SIMULATION.md`](docs/RUN_SIMULATION.md).
+For details about `scripts/run_isaac.sh` and `isaac_sim/spot_standalone.py`,
+see [`docs/RUN_SIMULATION.md`](docs/RUN_SIMULATION.md).
 
 
 
@@ -332,6 +393,9 @@ For details about `scripts/run_isaac.sh` and `isaac_sim/spot_standalone.py`, see
 .
 ├── isaac_sim/                  # Isaac Sim standalone Python scripts
 │   ├── spot_standalone.py      # main driver — loads scene + builds OmniGraph
+│   ├── spot_bridge_with_people.py
+│   │                              # combined Spot ROS 2 bridge + people simulation
+│   ├── people_control_sim.py     # people-only scenario UI
 │   ├── list_graphs.py          # debug: dump all OmniGraph nodes
 │   ├── rtx_lidar.py            # debug: RTX lidar prim helper
 │   └── export_tf_pose.py       # debug: dump TF tree for sanity-checking
@@ -339,7 +403,6 @@ For details about `scripts/run_isaac.sh` and `isaac_sim/spot_standalone.py`, see
 │   ├── isaac_hospital_scene_spot.usd
 │   ├── isaac_hospital_scene_spot_w_characters.usd
 │   ├── people_initial_commands.yaml
-│   ├── people_runtime_commands.txt
 │   ├── characters/
 │   └── scene_positions.txt     # prim pose dump for world editing
 ├── ros2_ws/src/spot_hospital_bringup/
@@ -348,8 +411,10 @@ For details about `scripts/run_isaac.sh` and `isaac_sim/spot_standalone.py`, see
 │   └── launch/robot_state_publisher.launch.py
 ├── scripts/
 │   ├── run_isaac.sh            # launch Isaac Sim with the standalone script
+│   ├── run_spot_bridge_with_people.sh
+│   │                              # launch combined v2.0 Spot + people bridge
+│   ├── run_people_sim.sh       # launch the character-control scene and UI
 │   ├── run_ros2.sh             # launch robot_state_publisher
-│   ├── run_people_test.sh      # launch the character-control scene and UI
 │   └── dump_scene_positions.py # dump prim poses to /tmp/scene_positions.txt
 ├── docs/photos/                # screenshots used in this README
 └── env/
@@ -390,19 +455,25 @@ the error, check that the USD reference resolved correctly.
 leg TFs by default. Keep `ENABLE_LEG_TF = False` and let
 `robot_state_publisher` own the URDF kinematic tree.
 
+**People are stuck in T-pose** — check the startup log from
+`run_spot_bridge_with_people.sh`. You should see nonzero
+`Registered people agents`. The combined bridge removes stale behavior scripts
+from non-`SkelRoot` child prims and initializes only valid character roots.
+
+**RealSense point cloud appears rolled or flipped** — use the camera frame from
+the point cloud header, usually `Camera_Pseudo_Depth`, as the RViz fixed or
+target frame. The generic `realsense` TF is a body-style mount frame kept for
+compatibility, while the point cloud is emitted in the actual depth camera
+frame.
+
 **"Authoring to instance proxy not allowed"** — when adding lights or other
 prims, write them under `/World/hospital/Inhouse_Light/` (outside the
 instanced hospital reference), not inside `/World`.
 
 ---
 
-## Media To Add
+## Media Still To Add
 
-- [ ] raw point cloud screenshot / capture
-- [ ] images from the four RGB camera streams
-- [ ] RealSense color and depth point cloud in RViz2
-- [ ] Isaac Sim GIF of guards patrolling and people waving / talking
-- [ ] RViz2 costmap screenshot
 - [ ] GIF of `/cmd_vel` robot control with `rqt_robot_steering`
 - [ ] GIF of Nav2 navigating through the front desk area
 

@@ -1,17 +1,10 @@
-# SPDX-FileCopyrightText: Copyright (c) 2021-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+"""Standalone Spot ROS 2 bridge with Isaac people simulation.
+
+This file is intentionally self-contained. It duplicates the required setup from
+spot_standalone.py and people_control_sim.py so Isaac Sim starts one app, one
+stage, one Spot ROS bridge, and one people simulation without importing either
+standalone script.
+"""
 
 from isaacsim import SimulationApp
 
@@ -20,21 +13,881 @@ simulation_app = SimulationApp({"headless": False})
 import argparse
 import math
 import os
+import time
 
 import carb
 import carb.settings
 import numpy as np
 import omni.graph.core as og
 import omni.kit.commands
+import omni.timeline
+import omni.ui as ui
 import omni.usd
+import yaml
 from isaacsim.core.api import World
 from isaacsim.core.utils.extensions import enable_extension
-from isaacsim.core.utils.prims import define_prim
 from isaacsim.robot.policy.examples.robots import SpotFlatTerrainPolicy
-from isaacsim.storage.native import get_assets_root_path
-from pxr import Gf, Usd, UsdGeom, UsdPhysics
+from omni.kit.scripting.scripts.script_manager import ScriptManager
+from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics
 
-# Enable ROS2 bridge before creating ROS2 OmniGraph nodes
+
+REPO_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+DEFAULT_PEOPLE_USD = os.path.join(REPO_DIR, "assets", "isaac_hospital_scene_spot_w_characters.usd")
+USD_PATH = os.path.realpath(os.environ.get("SPOT_PEOPLE_USD", os.environ.get("PEOPLE_TEST_USD", DEFAULT_PEOPLE_USD)))
+os.environ["PEOPLE_TEST_USD"] = USD_PATH
+os.environ["HOSPITAL_USD"] = USD_PATH
+COMMANDS_YAML_FILE = os.path.realpath(
+    os.environ.get("PEOPLE_INITIAL_COMMANDS", os.path.join(REPO_DIR, "assets", "people_initial_commands.yaml"))
+)
+PEOPLE_COMMAND_FILE = os.path.realpath(
+    os.environ.get("PEOPLE_COMMAND_FILE", os.path.join("/tmp", "spot_isaac_people_runtime_commands.txt"))
+)
+PEOPLE_COMMAND_FILE_IS_DEFAULT = PEOPLE_COMMAND_FILE == os.path.realpath(
+    os.path.join("/tmp", "spot_isaac_people_runtime_commands.txt")
+)
+CHARACTER_ROOT = "/World/Characters"
+SEAT_PROXY_ROOT = "/World/PeopleTestSeatTargets"
+STATUS_LABEL = None
+LAST_STATUS_LOG_TIME = 0.0
+SCENARIO_RUNNER = None
+
+# STARTUP_SEATED_PEOPLE = {
+#     "Female_visitor_02": "/World/hospital/SM_Chair_02a7",
+#     "Male_visitor_02": "/World/hospital/SM_Chair_02a5",
+#     "Male_visitor_01": "/World/hospital/SM_Chair_02a4",
+#     "Male_patient_04": "/World/hospital/SM_WheelChair_01a4",
+#     "Female_patient_05": "/World/hospital/SM_Chair_01a7",
+#     "Male_patient_05": "/World/hospital/SM_Chair_01a12",
+#     "Female_nurse_02": "/World/hospital/SM_Chair_01a13",
+#     "Male_patient_01": "/World/hospital/SM_Chair_01a3",
+# }
+
+
+def enable_people_extensions() -> None:
+    for ext in [
+        "omni.kit.scripting",
+        "omni.anim.timeline",
+        "omni.anim.graph.core",
+        "omni.anim.retarget.core",
+        "omni.anim.navigation.core",
+        "omni.anim.people",
+        "isaacsim.replicator.agent.core",
+        "omni.kit.mesh.raycast",
+    ]:
+        enable_extension(ext)
+    simulation_app.update()
+
+
+def open_stage() -> None:
+    print(f"[people_control_test] Loading: {USD_PATH}")
+    if not omni.usd.get_context().open_stage(USD_PATH):
+        raise RuntimeError(USD_PATH)
+    for _ in range(8):
+        simulation_app.update()
+
+
+def strip_nested_rigid_bodies() -> None:
+    stage = omni.usd.get_context().get_stage()
+    for prim in stage.Traverse():
+        path = str(prim.GetPath())
+        if path.startswith("/World/spot/body/") and path != "/World/spot/body":
+            if prim.HasAPI(UsdPhysics.RigidBodyAPI):
+                prim.RemoveAPI(UsdPhysics.RigidBodyAPI)
+                prim.GetAttribute("physics:rigidBodyEnabled").Set(False)
+
+
+def ensure_people_command_file() -> None:
+    if not PEOPLE_COMMAND_FILE or "://" in PEOPLE_COMMAND_FILE:
+        return
+    os.makedirs(os.path.dirname(PEOPLE_COMMAND_FILE), exist_ok=True)
+    mode = "w" if PEOPLE_COMMAND_FILE_IS_DEFAULT else "a"
+    with open(PEOPLE_COMMAND_FILE, mode, encoding="utf-8"):
+        pass
+
+
+def configure_people() -> None:
+    ensure_people_command_file()
+    settings = carb.settings.get_settings()
+    settings.set("/persistent/exts/omni.anim.people/character_prim_path", CHARACTER_ROOT)
+    settings.set("/exts/isaacsim.replicator.agent/characters_parent_prim_path", CHARACTER_ROOT)
+    settings.set("/exts/omni.anim.people/command_settings/command_file_path", PEOPLE_COMMAND_FILE)
+    settings.set("/exts/omni.anim.people/command_settings/number_of_loop", 0)
+    settings.set("/exts/omni.anim.people/navigation_settings/navmesh_enabled", True)
+    settings.set("/exts/omni.anim.people/navigation_settings/dynamic_avoidance_enabled", True)
+
+
+def bake_navmesh() -> None:
+    import omni.anim.navigation.core as nav
+
+    print("[people_control_test] Baking navmesh...")
+    nav_interface = nav.acquire_interface()
+    bake_fn = getattr(nav_interface, "start_navmesh_baking_and_wait", None)
+    if bake_fn is None:
+        bake_fn = getattr(nav_interface, "startNavMeshBakingAndWait", None)
+    if bake_fn is None:
+        print("[people_control_test] Navmesh bake API not found; using existing navmesh if available.")
+        return
+
+    if not bake_fn():
+        print("[people_control_test] Navmesh bake failed. GoTo commands may be rejected.")
+        return
+
+    print("[people_control_test] Navmesh ready.")
+    for _ in range(3):
+        simulation_app.update()
+
+
+def load_people() -> list[str]:
+    root = omni.usd.get_context().get_stage().GetPrimAtPath(CHARACTER_ROOT)
+    return [child.GetName() for child in root.GetAllChildren() if child.GetName() != "Biped_Setup"]
+
+
+def get_people_skelroots() -> list:
+    from isaacsim.replicator.agent.core.stage_util import CharacterUtil
+
+    return [
+        prim
+        for prim in CharacterUtil.get_characters_in_stage()
+        if str(prim.GetPath()).startswith(f"{CHARACTER_ROOT}/") and "/Biped_Setup/" not in str(prim.GetPath())
+    ]
+
+
+def get_people_skelroot_paths() -> set[str]:
+    return {str(prim.GetPath()) for prim in get_people_skelroots()}
+
+
+def destroy_script_manager_entry(script_manager, prim_path: str) -> int:
+    removed = 0
+    scripts = dict(script_manager._prim_to_scripts.get(prim_path, {}))
+    for script_path, script_instance in scripts.items():
+        if script_instance:
+            script_manager._destroy_script_instance(prim_path, script_path, script_instance)
+
+        current_scripts = script_manager._prim_to_scripts.get(prim_path)
+        if current_scripts is not None:
+            current_scripts.pop(script_path, None)
+            if not current_scripts:
+                script_manager._prim_to_scripts.pop(prim_path, None)
+
+        prim_paths = script_manager._script_to_prims.get(script_path)
+        if prim_paths is not None:
+            prim_paths.discard(prim_path)
+            if not prim_paths:
+                script_manager._unload_script(script_path)
+                script_manager._script_to_prims.pop(script_path, None)
+
+        removed += 1
+    return removed
+
+
+def remove_stale_script_manager_people_instances(valid_paths: set[str]) -> int:
+    script_manager = ScriptManager.get_instance()
+    if script_manager is None:
+        return 0
+
+    stale_paths = [
+        path
+        for path in list(script_manager._prim_to_scripts.keys())
+        if path.startswith(f"{CHARACTER_ROOT}/") and path not in valid_paths
+    ]
+    if not stale_paths:
+        return 0
+
+    removed = 0
+    print(f"[spot_bridge_with_people] Stale ScriptManager people script instances: {len(stale_paths)}")
+    print(f"[spot_bridge_with_people] First stale ScriptManager people script: {stale_paths[0]}")
+    for path in stale_paths:
+        removed += destroy_script_manager_entry(script_manager, path)
+    return removed
+
+
+def setup_saved_characters() -> None:
+    from isaacsim.replicator.agent.core.settings import BehaviorScriptPaths
+    from isaacsim.replicator.agent.core.stage_util import CharacterUtil
+
+    biped_prim = CharacterUtil.load_default_biped_to_stage()
+    anim_graph = CharacterUtil.get_anim_graph_from_character(biped_prim)
+    skelroots = get_people_skelroots()
+    CharacterUtil.setup_animation_graph_to_character(skelroots, anim_graph)
+    CharacterUtil.setup_python_scripts_to_character(skelroots, BehaviorScriptPaths.behavior_script_path())
+    for _ in range(15):
+        simulation_app.update()
+
+
+def init_behavior_scripts() -> None:
+    from isaacsim.replicator.agent.core.agent_manager import AgentManager
+
+    script_manager = ScriptManager.get_instance()
+    if script_manager is None or script_manager._stage is None:
+        print("[spot_bridge_with_people] ScriptManager is not ready for people behavior init.")
+        return
+
+    agent_manager = AgentManager.get_instance()
+    skelroot_paths = sorted(get_people_skelroot_paths())
+    if not skelroot_paths:
+        print("[spot_bridge_with_people] No people SkelRoots found for behavior init.")
+        return
+
+    script_manager._allow_scripts_to_execute = True
+    for path in skelroot_paths:
+        prim = script_manager._stage.GetPrimAtPath(path)
+        if prim and prim.IsValid():
+            script_manager._apply_scripts(prim)
+
+    for _ in range(50):
+        simulation_app.update()
+
+    remove_stale_script_manager_people_instances(set(skelroot_paths))
+
+    initialized = 0
+    missing = []
+    for path in skelroot_paths:
+        scripts = script_manager._prim_to_scripts.get(path, {})
+        behavior_scripts = [(script_path, inst) for script_path, inst in scripts.items() if inst and hasattr(inst, "init_character")]
+        if not behavior_scripts:
+            missing.append(path)
+            continue
+        for _, inst in behavior_scripts:
+            try:
+                inst.on_play()
+                initialized_ok = inst.init_character()
+            except Exception as exc:
+                print(f"[spot_bridge_with_people] Failed to initialize people script on {path}: {exc}")
+                continue
+            if initialized_ok:
+                agent_manager.register_agent(inst.get_agent_name(), inst.prim_path)
+                initialized += 1
+
+    print(f"[spot_bridge_with_people] Initialized people behavior scripts: {initialized}/{len(skelroot_paths)}")
+    if missing:
+        print(f"[spot_bridge_with_people] SkelRoots missing behavior script instances: {len(missing)}")
+        print(f"[spot_bridge_with_people] First missing behavior script instance: {missing[0]}")
+
+
+def load_yaml_config() -> dict:
+    with open(COMMANDS_YAML_FILE, "r", encoding="utf-8") as f:
+        return yaml.safe_load(f) or {}
+
+
+def normalize_command_line(line: str) -> str:
+    parts = line.split()
+    if len(parts) < 2:
+        return line.strip()
+    command = parts[1].upper()
+    if command == "IDLE":
+        parts[1] = "Idle"
+    elif command in {"LOOKAROUND", "LOOK_AROUND"}:
+        parts[1] = "LookAround"
+    elif command == "GOTO":
+        parts[1] = "GoTo"
+    if parts[1] == "GoTo" and len(parts) == 5:
+        parts.append("_")
+    return " ".join(parts)
+
+
+def command_agent_name(line: str) -> str:
+    parts = line.split()
+    return parts[0] if parts else ""
+
+
+def command_type(line: str) -> str:
+    parts = normalize_command_line(line).split()
+    return parts[1] if len(parts) > 1 else ""
+
+
+def format_template(value, variables: dict | None = None) -> str:
+    text = str(value)
+    if not variables:
+        return text
+    try:
+        return text.format(**variables)
+    except KeyError as exc:
+        print(f"[people_control_test] Missing template variable {exc} in: {text}")
+        return text
+
+
+def combo_box_index(model) -> int:
+    value_model = model.get_item_value_model()
+    if hasattr(value_model, "get_value_as_int"):
+        return value_model.get_value_as_int()
+    return value_model.as_int if hasattr(value_model, "as_int") else -1
+
+
+def get_agent(name: str):
+    from isaacsim.replicator.agent.core.agent_manager import AgentManager
+
+    return AgentManager.get_instance().get_agent_script_instance_by_name(name)
+
+
+def agent_command_done(agent) -> bool:
+    return agent is not None and agent.current_command is None and not agent.commands
+
+
+def parse_repeat_count(value):
+    if value is None:
+        return 1
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"inf", "infinite", "forever"}:
+            return "inf"
+        value = int(normalized)
+    value = int(value)
+    return "inf" if value == 0 else max(1, value)
+
+
+class PlanNode:
+    def tick(self, controller) -> bool:
+        return True
+
+    def status(self) -> str:
+        return "done"
+
+
+class CommandNode(PlanNode):
+    def __init__(self, command: str):
+        self.command = str(command)
+        self.started = False
+        self.started_at = None
+        self.expected_command_name = ""
+        self.command_text = ""
+
+    def tick(self, controller) -> bool:
+        agent = get_agent(controller.character_name)
+        if agent is None:
+            return False
+
+        if not self.started:
+            self.command_text = controller.render_command(self.command)
+            agent_name = command_agent_name(self.command_text)
+            if agent_name and agent_name != controller.character_name:
+                print(
+                    f"[people_control_test] {controller.character_name} controller received command for {agent_name}; releasing."
+                )
+                controller.released = True
+                return True
+
+            self.expected_command_name = command_type(self.command_text)
+            print(f"[people_control_test] {controller.character_name} -> {self.command_text}")
+            agent.replace_command([self.command_text])
+            self.started = True
+            self.started_at = time.monotonic()
+            return False
+
+        if agent.current_command is not None and self.expected_command_name:
+            running_name = agent.current_command.get_command_name()
+            if running_name != self.expected_command_name and time.monotonic() - self.started_at > 0.5:
+                print(
+                    f"[people_control_test] {controller.character_name} switched to {running_name}; releasing controller."
+                )
+                controller.released = True
+                return True
+
+        return agent_command_done(agent)
+
+    def status(self) -> str:
+        command = self.expected_command_name or command_type(self.command)
+        return f"command={command}" if command else "command"
+
+
+class WaitNode(PlanNode):
+    def __init__(self, seconds):
+        self.seconds = max(0.0, float(seconds))
+        self.started_at = None
+
+    def tick(self, controller) -> bool:
+        if self.started_at is None:
+            self.started_at = time.monotonic()
+        return time.monotonic() - self.started_at >= self.seconds
+
+    def status(self) -> str:
+        if self.started_at is None:
+            return f"wait={self.seconds:g}s"
+        remaining = max(0.0, self.seconds - (time.monotonic() - self.started_at))
+        return f"wait={remaining:.1f}s"
+
+
+class SequenceNode(PlanNode):
+    def __init__(self, children: list[PlanNode]):
+        self.children = children
+        self.index = 0
+
+    def tick(self, controller) -> bool:
+        while self.index < len(self.children):
+            if not self.children[self.index].tick(controller):
+                return False
+            self.index += 1
+        return True
+
+    def status(self) -> str:
+        if not self.children:
+            return "sequence=done"
+        return f"step={min(self.index + 1, len(self.children))}/{len(self.children)}"
+
+
+class ParallelNode(PlanNode):
+    def __init__(self, children: list[PlanNode]):
+        self.children = children
+        self.done_indexes: set[int] = set()
+
+    def tick(self, controller) -> bool:
+        for index, child in enumerate(self.children):
+            if index in self.done_indexes:
+                continue
+            if child.tick(controller):
+                self.done_indexes.add(index)
+        return len(self.done_indexes) == len(self.children)
+
+    def status(self) -> str:
+        return f"parallel={len(self.done_indexes)}/{len(self.children)}"
+
+
+class RepeatNode(PlanNode):
+    def __init__(self, child_spec, count):
+        self.child_spec = child_spec
+        self.count = parse_repeat_count(count)
+        self.completed = 0
+        self.child = make_plan_node(child_spec)
+
+    def tick(self, controller) -> bool:
+        if self.count != "inf" and self.completed >= self.count:
+            return True
+        if not self.child.tick(controller):
+            return False
+
+        self.completed += 1
+        if self.count != "inf" and self.completed >= self.count:
+            return True
+
+        self.child = make_plan_node(self.child_spec)
+        return False
+
+    def status(self) -> str:
+        if self.count == "inf":
+            return f"loop={self.completed + 1}/inf"
+        return f"loop={min(self.completed + 1, self.count)}/{self.count}"
+
+
+def make_plan_node(spec) -> PlanNode:
+    if isinstance(spec, str):
+        return CommandNode(spec)
+    if isinstance(spec, list):
+        return SequenceNode([make_plan_node(step) for step in spec])
+    if not isinstance(spec, dict):
+        return PlanNode()
+
+    node_type = str(spec.get("type", "")).lower()
+    if not node_type:
+        if "command" in spec:
+            node_type = "command"
+        elif "commands" in spec:
+            node_type = "commands"
+        elif "steps" in spec:
+            node_type = "sequence"
+        elif "children" in spec:
+            node_type = "parallel"
+
+    if node_type == "command":
+        return CommandNode(str(spec.get("command", "")))
+    if node_type == "commands":
+        return SequenceNode([CommandNode(command) for command in spec.get("commands", [])])
+    if node_type == "wait":
+        return WaitNode(spec.get("seconds", spec.get("duration", 0.0)))
+    if node_type == "sequence":
+        return SequenceNode([make_plan_node(step) for step in spec.get("steps", [])])
+    if node_type == "parallel":
+        return ParallelNode([make_plan_node(child) for child in spec.get("children", [])])
+    if node_type == "repeat":
+        child_spec = spec.get("child")
+        if child_spec is None:
+            if "steps" in spec:
+                child_spec = {"type": "sequence", "steps": spec.get("steps", [])}
+            elif "commands" in spec:
+                child_spec = {"type": "commands", "commands": spec.get("commands", [])}
+            else:
+                child_spec = spec.get("command", "")
+        return RepeatNode(child_spec, spec.get("count", 1))
+
+    print(f"[people_control_test] Unknown scenario node type: {node_type}")
+    return PlanNode()
+
+
+class CharacterController:
+    def __init__(self, character_name: str, plan_spec, variables: dict | None = None, label: str = ""):
+        self.character_name = character_name
+        self.plan_spec = plan_spec
+        self.variables = variables or {}
+        self.label = label
+        self.plan = make_plan_node(plan_spec)
+        self.released = False
+
+    def render_command(self, command: str) -> str:
+        variables = dict(self.variables)
+        variables.setdefault("character", self.character_name)
+        return normalize_command_line(format_template(command, variables))
+
+    def tick(self) -> bool:
+        return self.released or self.plan.tick(self)
+
+    def cancel(self) -> None:
+        self.released = True
+
+    def status_line(self) -> str:
+        agent = get_agent(self.character_name)
+        queued = len(agent.commands) if agent is not None else 0
+        return f"{self.character_name}: {self.label}, {current_command_name(agent)}, queued={queued}, {self.plan.status()}"
+
+
+def extract_command_lines(spec) -> list[str]:
+    if isinstance(spec, str):
+        return [spec]
+    if isinstance(spec, list):
+        lines = []
+        for item in spec:
+            lines.extend(extract_command_lines(item))
+        return lines
+    if not isinstance(spec, dict):
+        return []
+
+    lines = []
+    if "command" in spec:
+        lines.append(str(spec["command"]))
+    if isinstance(spec.get("commands"), list):
+        lines.extend(str(command) for command in spec["commands"])
+    if isinstance(spec.get("steps"), list):
+        lines.extend(extract_command_lines(spec["steps"]))
+    if isinstance(spec.get("children"), list):
+        lines.extend(extract_command_lines(spec["children"]))
+    if "child" in spec:
+        lines.extend(extract_command_lines(spec["child"]))
+    return lines
+
+
+def command_plan(commands: list[str], count=1):
+    plan = {"type": "sequence", "steps": [{"type": "command", "command": command} for command in commands]}
+    parsed_count = parse_repeat_count(count)
+    if parsed_count == 1:
+        return plan
+    return {"type": "repeat", "count": parsed_count, "child": plan}
+
+
+class ScenarioRunner:
+    def __init__(self):
+        self.controllers: dict[str, CharacterController] = {}
+        self.label = "idle"
+
+    def start(self, label: str, scenario, variables: dict | None = None) -> None:
+        variables = variables or {}
+        character_plans = self._compile_scenario(scenario, variables)
+        if not character_plans:
+            print(f"[people_control_test] Scenario '{label}' did not produce any character plans.")
+            return
+
+        self.label = label
+        for character_name, plan_spec in character_plans.items():
+            self.replace_controller(character_name, plan_spec, variables, label)
+        refresh_status(force_log=True)
+
+    def stop_all(self) -> None:
+        for controller in self.controllers.values():
+            controller.cancel()
+        self.controllers.clear()
+        self.label = "idle"
+        if STATUS_LABEL is not None:
+            STATUS_LABEL.text = "Scenario: idle"
+
+    def replace_controller(self, character_name: str, plan_spec, variables: dict, label: str) -> None:
+        old_controller = self.controllers.pop(character_name, None)
+        if old_controller is not None:
+            old_controller.cancel()
+        self.controllers[character_name] = CharacterController(character_name, plan_spec, variables, label)
+
+    def tick(self) -> None:
+        for character_name, controller in list(self.controllers.items()):
+            if controller.tick():
+                self.controllers.pop(character_name, None)
+        if not self.controllers:
+            self.label = "idle"
+
+    def status_lines(self) -> list[str]:
+        return [controller.status_line() for _, controller in sorted(self.controllers.items())]
+
+    def _compile_scenario(self, scenario, variables: dict) -> dict[str, object]:
+        if isinstance(scenario, dict) and isinstance(scenario.get("characters"), dict):
+            plans = {}
+            for raw_name, plan_spec in scenario["characters"].items():
+                character_name = format_template(raw_name, variables)
+                if character_name:
+                    plans[character_name] = plan_spec
+            return plans
+
+        if isinstance(scenario, dict) and str(scenario.get("type", "")).lower() == "parallel":
+            plans = {}
+            for child in scenario.get("children", []):
+                for character_name, plan_spec in self._compile_scenario(child, variables).items():
+                    if character_name in plans:
+                        print(f"[people_control_test] Duplicate controller for {character_name}; using the later plan.")
+                    plans[character_name] = plan_spec
+            return plans
+
+        if isinstance(scenario, dict) and isinstance(scenario.get("commands"), list):
+            count = scenario.get("count", scenario.get("repeat", 1))
+            return self._compile_command_list(scenario["commands"], count, variables)
+
+        if isinstance(scenario, list):
+            return self._compile_command_list(scenario, 1, variables)
+
+        commands = extract_command_lines(scenario)
+        command_names = {
+            command_agent_name(normalize_command_line(format_template(command, variables))) for command in commands
+        }
+        command_names.discard("")
+        if len(command_names) == 1:
+            return {next(iter(command_names)): scenario}
+        if len(command_names) > 1:
+            print("[people_control_test] Multi-character sequence is ambiguous; use 'characters' or 'parallel'.")
+        return {}
+
+    def _compile_command_list(self, commands: list[str], count, variables: dict) -> dict[str, object]:
+        grouped: dict[str, list[str]] = {}
+        for command in commands:
+            rendered = normalize_command_line(format_template(command, variables))
+            character_name = command_agent_name(rendered)
+            if character_name:
+                grouped.setdefault(character_name, []).append(rendered)
+        return {character_name: command_plan(character_commands, count) for character_name, character_commands in grouped.items()}
+
+
+SCENARIO_RUNNER = ScenarioRunner()
+
+
+def current_command_name(agent) -> str:
+    if agent is None:
+        return "not registered"
+    if agent.current_command is not None:
+        return agent.current_command.get_command_name()
+    return "queued" if agent.commands else "done"
+
+
+def refresh_status(force_log: bool = False) -> None:
+    global LAST_STATUS_LOG_TIME
+
+    SCENARIO_RUNNER.tick()
+    lines = SCENARIO_RUNNER.status_lines()
+    if not lines:
+        if STATUS_LABEL is not None:
+            STATUS_LABEL.text = "Scenario: idle"
+        return
+
+    if STATUS_LABEL is not None:
+        STATUS_LABEL.text = f"{SCENARIO_RUNNER.label}: {len(lines)} active"
+
+    now = time.monotonic()
+    if force_log or now - LAST_STATUS_LOG_TIME > 1.0:
+        print("[people_control_test] " + " | ".join(lines))
+        LAST_STATUS_LOG_TIME = now
+
+
+def ui_variables(selected_character: dict, x_model, y_model, r_model) -> dict:
+    return {
+        "character": selected_character.get("character", ""),
+        "x": x_model.model.get_value_as_float(),
+        "y": y_model.model.get_value_as_float(),
+        "r": r_model.model.get_value_as_float(),
+    }
+
+
+def start_named_scenario(name: str, selected_character: dict, x_model, y_model, r_model) -> None:
+    cfg = load_yaml_config()
+    scenarios = cfg.get("scenarios", {})
+    if not isinstance(scenarios, dict):
+        print(f"[people_control_test] YAML 'scenarios' must be a mapping in {COMMANDS_YAML_FILE}.")
+        return
+
+    scenario = scenarios.get(name)
+    if not isinstance(scenario, dict):
+        print(f"[people_control_test] Scenario '{name}' is not configured in {COMMANDS_YAML_FILE}.")
+        return
+
+    label = str(scenario.get("label", name))
+    SCENARIO_RUNNER.start(label, scenario, ui_variables(selected_character, x_model, y_model, r_model))
+
+
+def run_button(button: dict, selected_character: dict, x_model, y_model, r_model) -> None:
+    action = str(button.get("action", "")).lower()
+    scenario_name = button.get("scenario")
+
+    if action == "reset":
+        SCENARIO_RUNNER.stop_all()
+    elif action == "stop":
+        SCENARIO_RUNNER.stop_all()
+        return
+
+    if scenario_name:
+        start_named_scenario(str(scenario_name), selected_character, x_model, y_model, r_model)
+
+
+def yaml_buttons() -> list[dict]:
+    cfg = load_yaml_config()
+    buttons = cfg.get("buttons", [])
+    if not isinstance(buttons, list):
+        print(f"[people_control_test] YAML 'buttons' must be a list in {COMMANDS_YAML_FILE}.")
+        buttons = []
+
+    normalized = [button if isinstance(button, dict) else {"label": str(button)} for button in buttons[:9]]
+    while len(normalized) < 9:
+        normalized.append({"label": "-"})
+    return normalized
+
+
+def build_ui() -> ui.Window:
+    global STATUS_LABEL
+
+    people = sorted(load_people())
+    default_index = people.index("Male_patient_01") if "Male_patient_01" in people else 0
+    selected_character = {"character": people[default_index] if people else ""}
+    buttons = yaml_buttons()
+
+    window = ui.Window("People Control Test", width=380, height=290)
+    with window.frame:
+        with ui.VStack(spacing=10, style={"margin": 8}):
+            with ui.HStack(spacing=8):
+                ui.Label("Character", width=80)
+                selected_model = ui.ComboBox(default_index, *people).model
+
+                def on_character_changed(model, _item):
+                    index = combo_box_index(model)
+                    if 0 <= index < len(people):
+                        selected_character["character"] = people[index]
+                        print(f"[people_control_test] UI selected character: {selected_character['character']}")
+                    else:
+                        selected_character["character"] = ""
+                        print(f"[people_control_test] UI selected character index is invalid: {index}")
+
+                selected_model.add_item_changed_fn(on_character_changed)
+
+            with ui.HStack(spacing=8):
+                ui.Label("X", width=16)
+                x = ui.FloatField()
+                x.model.set_value(0.0)
+                ui.Label("Y", width=16)
+                y = ui.FloatField()
+                y.model.set_value(0.0)
+                ui.Label("Yaw", width=28)
+                r = ui.FloatField()
+                r.model.set_value(0.0)
+
+            for row in range(3):
+                with ui.HStack(spacing=6):
+                    for button in buttons[row * 3 : row * 3 + 3]:
+                        enabled = bool(button.get("scenario") or button.get("action"))
+                        ui.Button(
+                            str(button.get("label", "-")),
+                            clicked_fn=lambda b=button: run_button(b, selected_character, x, y, r),
+                            enabled=enabled,
+                            height=34,
+                        )
+            STATUS_LABEL = ui.Label("Scenario: idle")
+    return window
+
+
+
+def remove_stale_people_scripts() -> None:
+    """Remove behavior scripts authored on non-SkelRoot character descendants."""
+    import OmniScriptingSchema
+    import omni.kit.commands
+    from pxr import UsdSkel
+
+    stage = omni.usd.get_context().get_stage()
+    root = stage.GetPrimAtPath(CHARACTER_ROOT)
+    if not root.IsValid():
+        print(f"[spot_bridge_with_people] Character root not found: {CHARACTER_ROOT}")
+        return
+
+    valid_paths = get_people_skelroot_paths()
+    stale_paths = []
+    for prim in Usd.PrimRange(root):
+        prim_path = str(prim.GetPath())
+        if prim == root or prim_path in valid_paths or prim.IsA(UsdSkel.Root):
+            continue
+        if prim.HasAPI(OmniScriptingSchema.OmniScriptingAPI) or prim.HasAttribute("omni:scripting:scripts"):
+            stale_paths.append(prim_path)
+
+    print(f"[spot_bridge_with_people] Stale non-SkelRoot people scripts: {len(stale_paths)}")
+    if stale_paths:
+        omni.kit.commands.execute("RemoveScriptingAPICommand", paths=[Sdf.Path(path) for path in stale_paths])
+        for path in stale_paths:
+            prim = stage.GetPrimAtPath(path)
+            attr = prim.GetAttribute("omni:scripting:scripts")
+            if attr:
+                attr.Set([])
+
+    script_manager = ScriptManager.get_instance()
+    if script_manager is not None:
+        for path in stale_paths:
+            if path not in script_manager._prim_to_scripts:
+                continue
+            destroy_script_manager_entry(script_manager, path)
+        remove_stale_script_manager_people_instances(valid_paths)
+
+
+def force_load_skelroot_people_scripts() -> None:
+    """Instantiate behavior scripts on the valid character SkelRoots."""
+    script_manager = ScriptManager.get_instance()
+    if script_manager is None or script_manager._stage is None:
+        print("[spot_bridge_with_people] ScriptManager is not ready for SkelRoot script load.")
+        return
+
+    script_manager._allow_scripts_to_execute = True
+    loaded = 0
+    for skelroot in get_people_skelroots():
+        prim = script_manager._stage.GetPrimAtPath(str(skelroot.GetPath()))
+        if prim and prim.IsValid():
+            script_manager._apply_scripts(prim)
+            loaded += 1
+    print(f"[spot_bridge_with_people] Requested behavior script load for SkelRoots: {loaded}")
+
+
+def log_people_registration() -> None:
+    from isaacsim.replicator.agent.core.agent_manager import AgentManager
+    from isaacsim.replicator.agent.core.stage_util import CharacterUtil
+
+    skelroots = [str(prim.GetPath()) for prim in CharacterUtil.get_characters_in_stage()]
+    print(f"[spot_bridge_with_people] Character SkelRoots: {len(skelroots)}")
+    if skelroots:
+        print(f"[spot_bridge_with_people] First Character SkelRoot: {skelroots[0]}")
+
+    agent_manager = AgentManager.get_instance()
+    registered = list(agent_manager.get_all_agent_names())
+    print(f"[spot_bridge_with_people] Registered people agents: {len(registered)}")
+    if registered:
+        print(f"[spot_bridge_with_people] First registered people agent: {registered[0]}")
+
+
+def setup_people_controls(open_stage_file: bool = False) -> ui.Window:
+    configure_people()
+    if open_stage_file:
+        open_stage()
+    strip_nested_rigid_bodies()
+    configure_people()
+    remove_stale_people_scripts()
+    bake_navmesh()
+    setup_saved_characters()
+    remove_stale_people_scripts()
+    force_load_skelroot_people_scripts()
+    init_behavior_scripts()
+    log_people_registration()
+    return build_ui()
+
+# Keep the entrypoint lifecycle aligned with people_control_sim.py:
+# configure people, open the populated USD, register people behavior scripts,
+# and only then add the Spot ROS bridge on top of that running stage.
+enable_people_extensions()
+configure_people()
+open_stage()
+configure_people()
+control_window = setup_people_controls(open_stage_file=False)
+
+# Enable ROS2 bridge before importing rclpy or creating ROS2 OmniGraph nodes.
 enable_extension("isaacsim.ros2.bridge")
 simulation_app.update()
 
@@ -196,24 +1049,14 @@ def on_physics_step(step_size) -> None:
 # spawn world
 # Increase PhysX CPU thread count (default is usually 4). 0 = use all cores.
 carb.settings.get_settings().set("/physics/numThreads", PHYSICS_NUM_THREADS)
-print(f"[spot_standalone] PhysX threads: {carb.settings.get_settings().get('/physics/numThreads')}")
+print(f"[spot_bridge_with_people] PhysX threads: {carb.settings.get_settings().get('/physics/numThreads')}")
 my_world = World(stage_units_in_meters=1.0, physics_dt=PHYSICS_DT, rendering_dt=RENDERING_DT)
-assets_root_path = get_assets_root_path()
-if assets_root_path is None:
-    carb.log_error("Could not find Isaac Sim assets folder")
 
-# spawn hospital scene
-# Asset path resolution priority:
-#   1. HOSPITAL_USD environment variable (set by scripts/run_isaac.sh)
-#   2. Default: <repo>/assets/isaac_hospital_scene_spot.usd (relative to this file)
-prim = define_prim("/World", "Xform")
-_default_asset = os.path.join(
-    os.path.dirname(os.path.realpath(__file__)),
-    "..", "assets", "isaac_hospital_scene_spot.usd",
-)
-asset_path = os.path.realpath(os.environ.get("HOSPITAL_USD", _default_asset))
-print(f"[spot_standalone] Loading hospital scene from: {asset_path}")
-prim.GetReferences().AddReference(asset_path)
+# Reuse the stage that people_control_sim.py opened. Do not add a second
+# hospital reference here; that can leave the people extension looking at stale
+# character prims from a different composition path.
+asset_path = USD_PATH
+print(f"[spot_bridge_with_people] Using people-loaded stage: {asset_path}")
 
 # spawn robot
 spot = SpotFlatTerrainPolicy(
@@ -232,7 +1075,7 @@ for _p in _stage.Traverse():
     _path = str(_p.GetPath())
     if _path.startswith("/World/spot/body/") and _path != "/World/spot/body":
         if _p.HasAPI(UsdPhysics.RigidBodyAPI):
-            print(f"[spot_standalone] Removing nested RigidBodyAPI from {_path}")
+            print(f"[spot_bridge_with_people] Removing nested RigidBodyAPI from {_path}")
             _p.RemoveAPI(UsdPhysics.RigidBodyAPI)
             # Disable the rigid body flag too, in case the API removal isn't enough
             attr = _p.GetAttribute("physics:rigidBodyEnabled")
@@ -275,9 +1118,9 @@ if ENABLE_FISHEYE_CAMERAS:
         _cam_prim.GetVerticalApertureAttr().Set(_v_ap)
         _cam_prim.GetClippingRangeAttr().Set(Gf.Vec2f(*FISHEYE_CLIP_RANGE))
         _BODY_CAMERA_PRIMS[_name] = _cam_path
-        print(f"[spot_standalone] Created body camera {_cam_path}")
+        print(f"[spot_bridge_with_people] Created body camera {_cam_path}")
 else:
-    print("[spot_standalone] Fisheye cameras disabled (ENABLE_FISHEYE_CAMERAS=False)")
+    print("[spot_bridge_with_people] Fisheye cameras disabled (ENABLE_FISHEYE_CAMERAS=False)")
 
 
 
@@ -341,10 +1184,10 @@ def _frame_id_from_prim_path(prim_path: str, fallback: str) -> str:
 
 def _select_realsense_camera_prims(camera_prims: list[str]):
     if not ENABLE_REALSENSE:
-        print("[spot_standalone] RealSense disabled (ENABLE_REALSENSE=False)")
+        print("[spot_bridge_with_people] RealSense disabled (ENABLE_REALSENSE=False)")
         return None, None, FRAME_REALSENSE, FRAME_REALSENSE
     if not camera_prims:
-        carb.log_warn("[spot_standalone] No Camera prims found under rsd455 — RealSense graphs skipped")
+        carb.log_warn("[spot_bridge_with_people] No Camera prims found under rsd455 — RealSense graphs skipped")
         return None, None, FRAME_REALSENSE, FRAME_REALSENSE
 
     color_cams = [c for c in camera_prims if "color" in c.lower() or "rgb" in c.lower()]
@@ -353,8 +1196,8 @@ def _select_realsense_camera_prims(camera_prims: list[str]):
     depth_cam = depth_cams[0] if depth_cams else camera_prims[-1]
     color_frame = _frame_id_from_prim_path(color_cam, "realsense_color")
     depth_frame = _frame_id_from_prim_path(depth_cam, "realsense_depth")
-    print(f"[spot_standalone] RealSense cameras: color={color_cam}, depth={depth_cam}")
-    print(f"[spot_standalone] RealSense frames: color={color_frame}, depth={depth_frame}")
+    print(f"[spot_bridge_with_people] RealSense cameras: color={color_cam}, depth={depth_cam}")
+    print(f"[spot_bridge_with_people] RealSense frames: color={color_frame}, depth={depth_frame}")
     return color_cam, depth_cam, color_frame, depth_frame
 
 
@@ -362,7 +1205,7 @@ def _select_realsense_camera_prims(camera_prims: list[str]):
 # The outer xform and the inner Camera often share the same name.
 _fc_cams = _find_camera_prims_under(_FRONT_CAMERA_XFORM)
 FRONT_CAMERA_PRIM = _fc_cams[0] if _fc_cams else _FRONT_CAMERA_XFORM
-print(f"[spot_standalone] Front camera prim: {FRONT_CAMERA_PRIM}")
+print(f"[spot_bridge_with_people] Front camera prim: {FRONT_CAMERA_PRIM}")
 
 # Auto-discover RealSense Camera prims; try body-mounted path as fallback.
 _rs_root = REALSENSE_PRIM
@@ -371,14 +1214,14 @@ if not _rs_cams:
     _rs_root = "/World/spot/body/rsd455"
     _rs_cams = _find_camera_prims_under(_rs_root)
 if _rs_cams:
-    print(f"[spot_standalone] RealSense camera prims found under {_rs_root}: {_rs_cams}")
+    print(f"[spot_bridge_with_people] RealSense camera prims found under {_rs_root}: {_rs_cams}")
 else:
     # Dump all descendant prim types so we can identify the right path/type
     for _candidate in [REALSENSE_PRIM, "/World/spot/body/rsd455"]:
         for _p in _stage.Traverse():
             _pp = str(_p.GetPath())
             if _pp.startswith(_candidate + "/"):
-                carb.log_warn(f"[spot_standalone] rsd455 child: {_pp}  type={_p.GetTypeName()}")
+                carb.log_warn(f"[spot_bridge_with_people] rsd455 child: {_pp}  type={_p.GetTypeName()}")
 
 REALSENSE_COLOR_CAM, REALSENSE_DEPTH_CAM, FRAME_REALSENSE_COLOR, FRAME_REALSENSE_DEPTH = _select_realsense_camera_prims(_rs_cams)
 
@@ -402,7 +1245,7 @@ def _body_rel_tf(prim_path: str):
         _im = _q.GetImaginary()
         return [float(_tr[0]), float(_tr[1]), float(_tr[2])], [float(_im[0]), float(_im[1]), float(_im[2]), float(_q.GetReal())]
     except Exception as _e:
-        carb.log_warn(f"[spot_standalone] Could not compute TF for {prim_path}: {_e}. Using identity.")
+        carb.log_warn(f"[spot_bridge_with_people] Could not compute TF for {prim_path}: {_e}. Using identity.")
         return [0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0]
 
 
@@ -437,9 +1280,9 @@ LEG_PRIMS = [
     if str(_p.GetPath()).startswith("/World/spot/") and str(_p.GetPath()).split("/")[-1] in _LEG_PRIM_NAMES
 ]
 if not LEG_PRIMS:
-    carb.log_warn("[spot_standalone] No leg prims found under /World/spot — check prim names in USD")
+    carb.log_warn("[spot_bridge_with_people] No leg prims found under /World/spot — check prim names in USD")
 else:
-    print(f"[spot_standalone] Found {len(LEG_PRIMS)} leg prims for TF: {LEG_PRIMS}")
+    print(f"[spot_bridge_with_people] Found {len(LEG_PRIMS)} leg prims for TF: {LEG_PRIMS}")
 
 try:
     og.Controller.edit(
@@ -619,7 +1462,7 @@ try:
         _tf_create_nodes = [n for n in _tf_create_nodes if n[0] != "TF_Articulation"]
         _tf_set_values = [v for v in _tf_set_values if not v[0].startswith("TF_Articulation.")]
         _tf_connect = [c for c in _tf_connect if "TF_Articulation" not in c[0] and "TF_Articulation" not in c[1]]
-        print("[spot_standalone] Leg TF disabled (ENABLE_LEG_TF=False) — relying on external robot_state_publisher")
+        print("[spot_bridge_with_people] Leg TF disabled (ENABLE_LEG_TF=False) — relying on external robot_state_publisher")
     if ENABLE_REALSENSE:
         _tf_create_nodes.append(
             ("TF_BodyToRealsense", "isaacsim.ros2.bridge.ROS2PublishRawTransformTree")
@@ -655,7 +1498,7 @@ try:
                 ("OnPlaybackTick.outputs:tick", "TF_RealsenseCameras.inputs:execIn"),
                 ("ReadSimTime.outputs:simulationTime", "TF_RealsenseCameras.inputs:timeStamp"),
             ])
-            print(f"[spot_standalone] Publishing RealSense camera TFs: {_realsense_camera_prims}")
+            print(f"[spot_bridge_with_people] Publishing RealSense camera TFs: {_realsense_camera_prims}")
     og.Controller.edit(
         {"graph_path": "/World/TFGraph", "evaluator_name": "execution"},
         {
@@ -863,6 +1706,9 @@ if REALSENSE_DEPTH_CAM:
     except Exception as e:
         carb.log_error(f"Failed to create RealSense depth graph: {e}")
 
+base_command = np.zeros(3)
+omni.timeline.get_timeline_interface().play()
+
 my_world.reset()
 my_world.add_physics_callback("physics_step", callback_fn=on_physics_step)
 
@@ -871,7 +1717,6 @@ rclpy.init()
 ros_node = rclpy.create_node("spot_cmd_vel_listener")
 
 # robot command [vx, vy, yaw_rate]
-base_command = np.zeros(3)
 
 
 if CMD_VEL_STAMPED:
@@ -926,6 +1771,7 @@ isaac_js_sub = ros_node.create_subscription(
 
 while simulation_app.is_running():
     my_world.step(render=True)
+    refresh_status()
     # Process incoming /cmd_vel messages every step (non-blocking)
     rclpy.spin_once(ros_node, timeout_sec=0.0)
     if my_world.is_stopped():
