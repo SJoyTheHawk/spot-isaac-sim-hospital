@@ -1,5 +1,36 @@
 # Changelog
 
+## 2.0.1 - 2026-05-10
+
+### Added
+
+- Added a root `LICENSE` file with the Apache-2.0 license text.
+- Added public release license wording to the README, including project copyright, owner contact, and NVIDIA Isaac Sim asset license references.
+- Added README GIF media references for people simulation and Nav2/RViz captures.
+- Added `FRONT_CAMERA_AS_FISHEYE` / `FRONT_CAMERA_FISHEYE_HFOV_RAD` configuration and README documentation so the front RGB camera can be configured as a fisheye-style camera.
+- Added README guidance to disable extra fisheye cameras first when the simulation feels low-FPS or compute-bound.
+- Added the full Nav2 navigation video link alongside the trimmed README preview GIF.
+
+### Changed
+
+- Renamed the public project/report title from `spot-isaac-lab-hospital` to **Spot Isaac Sim Hospital**.
+- Updated clone/path examples to use `spot-isaac-sim-hospital`.
+- Updated ROS package maintainer/author metadata to `Johnny Sze`, `Rocky Road Studio`, and `rockyroadstudio@outlook.com`.
+- Updated `env/spot_isaac.env.template` to default `ISAAC_SIM_PATH` to `$HOME/isaac-sim` instead of a machine-specific absolute path.
+- Updated documentation paths in `README.md`, `docs/MODIFY_WORLD.md`, and `scripts/dump_scene_positions.py`.
+
+### Removed
+
+- Removed obsolete `argparse` / `--test` parsing from the Spot Isaac Sim entrypoints.
+- Removed stale duplicated constants, unused helper functions, and unused local variables from `spot_standalone.py` and `spot_bridge_with_people.py`.
+- Removed compatibility environment writes for `PEOPLE_TEST_USD` and `HOSPITAL_USD` from the combined Spot + people bridge.
+
+### Fixed
+
+- Avoided RealSense camera prim discovery when `ENABLE_REALSENSE = False`.
+- Avoided side/back fisheye TF setup when `ENABLE_FISHEYE_CAMERAS = False`.
+- Replaced stale README media links that pointed at removed MP4 files with current GIF paths.
+
 ## 2.0.0 - 2026-05-09
 
 ### Added

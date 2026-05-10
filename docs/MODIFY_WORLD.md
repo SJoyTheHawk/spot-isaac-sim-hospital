@@ -23,7 +23,7 @@ The hospital USD scene (`isaac_hospital_scene_spot.usd`) ships with decorative l
 Run the position-dump script from the Isaac Sim root so that the correct Python environment is sourced:
 
 ```bash
-cd spot-isaac-lab-hospital/scripts
+cd spot-isaac-sim-hospital/scripts
 ./run_isaac.sh ./dump_scene_positions.py
 ```
 

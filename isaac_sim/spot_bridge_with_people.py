@@ -10,7 +10,6 @@ from isaacsim import SimulationApp
 
 simulation_app = SimulationApp({"headless": False})
 
-import argparse
 import math
 import os
 import time
@@ -33,9 +32,7 @@ from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics
 
 REPO_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 DEFAULT_PEOPLE_USD = os.path.join(REPO_DIR, "assets", "isaac_hospital_scene_spot_w_characters.usd")
-USD_PATH = os.path.realpath(os.environ.get("SPOT_PEOPLE_USD", os.environ.get("PEOPLE_TEST_USD", DEFAULT_PEOPLE_USD)))
-os.environ["PEOPLE_TEST_USD"] = USD_PATH
-os.environ["HOSPITAL_USD"] = USD_PATH
+USD_PATH = os.path.realpath(os.environ.get("SPOT_PEOPLE_USD", DEFAULT_PEOPLE_USD))
 COMMANDS_YAML_FILE = os.path.realpath(
     os.environ.get("PEOPLE_INITIAL_COMMANDS", os.path.join(REPO_DIR, "assets", "people_initial_commands.yaml"))
 )
@@ -46,21 +43,128 @@ PEOPLE_COMMAND_FILE_IS_DEFAULT = PEOPLE_COMMAND_FILE == os.path.realpath(
     os.path.join("/tmp", "spot_isaac_people_runtime_commands.txt")
 )
 CHARACTER_ROOT = "/World/Characters"
-SEAT_PROXY_ROOT = "/World/PeopleTestSeatTargets"
+
+# Scale factors mapping real-world cmd_vel (m/s, m/s, rad/s) to the policy's
+# internal command space. SpotFlatTerrainPolicy was trained with vx/vy in
+# roughly the 0.5-2.0 range and yaw_rate up to ~2.0 rad/s.
+# Tune CMD_SCALE so that 1.0 m/s from ROS maps to a comfortable walking gait.
+CMD_SCALE = np.array([1.44, 1.44, 1.480140971])  # [vx_scale, vy_scale, yaw_scale]
+
+# Deadband threshold (m/s, m/s, rad/s). Below this, use CMD_IDLE instead.
+CMD_DEADBAND = np.array([0.05, 0.05, 0.05])
+
+# Minimum command injected when zero is received, keeps the policy in a stable
+# walking gait rather than drifting/twisting from a dead-stop command.
+CMD_IDLE = np.array([0.0, 0.0, 0.05])
+
+# ---------------------------------------------------------------------------
+# Sensor mount configuration (body-relative, URDF convention: +X fwd, +Y left,
+# +Z up). All angles are in radians (URDF intrinsic XYZ rpy). These are the
+# single source of truth for both ROS TF (body -> <sensor>) and USD camera
+# authoring of the new fisheye prims.
+# ---------------------------------------------------------------------------
+# Existing sensor mounts (TF only; the prims themselves already exist in USD).
+SENSOR_LASER_TRANS = (0.223, 0.0, 0.1271)
+SENSOR_LASER_RPY = (0.0, 0.0, 0.0)
+
+SENSOR_FRONT_CAMERA_TRANS = (0.26, 0.0, 0.17)
+SENSOR_FRONT_CAMERA_RPY = (0.0, 0.0, 0.0)
+
+SENSOR_REALSENSE_TRANS = (0.45, 0.0, 0.07)
+SENSOR_REALSENSE_RPY = (0.0, 0.872665, 0.0)
+
+SENSOR_IMU_TRANS = (0.0, 0.0, 0.0)
+SENSOR_IMU_RPY = (0.0, 0.0, 0.0)
+
+# Feature toggles.
+ENABLE_FISHEYE_CAMERAS = False
+ENABLE_REALSENSE = False
+FRONT_CAMERA_AS_FISHEYE = True
+# Publish leg-link TFs from Isaac Sim. Set False when an external
+# robot_state_publisher with the Spot URDF is running, otherwise the two will
+# emit conflicting TFs (Isaac uses flat USD prim names, URDF nests them).
+ENABLE_LEG_TF = False
+
+# Number of PhysX CPU worker threads. Keep this >=4 to avoid the
+# physics step falling behind real time, which would make /clock advance
+# unevenly and produce jittery sensor timestamps downstream.
+PHYSICS_NUM_THREADS = 12
+
+PHYSICS_DT = 1 / 500
+RENDERING_DT = 1 / 50
+
+# Body-mounted fisheye cameras (left/right/back). Each tuple is:
+#   (name, translation_xyz_m, rpy_rad, horizontal_fov_rad)
+FISHEYE_CAMERA_SPECS = [
+    ("left_fisheye", (-0.125, 0.12, 0.035), (0.0, 0.2, 1.5707963267948966), 1.78634),
+    ("right_fisheye", (-0.125, -0.12, 0.035), (0.0, 0.2, -1.5707963267948966), 1.78634),
+    ("back_fisheye", (-0.425, 0.0, 0.01), (0.0, 0.3, 3.1415926535897931), 1.78634),
+]
+FISHEYE_RES = (640, 480)
+FISHEYE_FOCAL_LEN_MM = 1.4
+FISHEYE_CLIP_RANGE = (0.05, 1000.0)
+FRONT_CAMERA_RES = (640, 480)
+FRONT_CAMERA_FISHEYE_HFOV_RAD = 1.78634
+
+# ---------------------------------------------------------------------------
+# ROS2 topic names
+# ---------------------------------------------------------------------------
+TOPIC_CLOCK = "clock"
+TOPIC_LIDAR_POINT_CLOUD = "point_cloud"
+TOPIC_ODOM = "odom"
+TOPIC_IMU = "imu/data"
+TOPIC_TF_STATIC = "tf_static"
+TOPIC_ISAAC_JOINT_STATES = "isaac_joint_states"
+TOPIC_JOINT_STATES = "joint_states"
+TOPIC_FRONT_CAMERA_IMAGE = "camera/rgb/image_raw"
+TOPIC_REALSENSE_COLOR = "realsense/camera"
+TOPIC_REALSENSE_DEPTH = "realsense/depth/points"
+TOPIC_CMD_VEL = "cmd_vel"
+
+# Set True to subscribe to geometry_msgs/TwistStamped instead of Twist.
+# Nav2 / ros2_control publish TwistStamped by default in ROS 2 Jazzy.
+CMD_VEL_STAMPED = True
+
+# ---------------------------------------------------------------------------
+# ROS2 / TF frame names
+# ---------------------------------------------------------------------------
+FRAME_ODOM = "odom"
+FRAME_BASE_LINK = "base_link"
+FRAME_BODY = "body"
+FRAME_LASER = "laser"
+FRAME_FRONT_CAMERA = "front_camera"
+FRAME_IMU = "imu"
+FRAME_REALSENSE = "realsense"
+
+# USD prim paths.
+SPOT_BODY_PRIM = "/World/spot/body"
+LIDAR_CAMERA_PRIM = "/World/spot/body/XT_32/PandarXT_32_10hz"
+FRONT_CAMERA_XFORM = "/World/spot/body/Camera_SG2_OX03CC_5200_GMSL2_H60YA"
+REALSENSE_PRIM = "/World/spot/rsd455"
+IMU_PRIM_PATH = SPOT_BODY_PRIM + "/imu_sensor"
+
+# Discover the 16 leg link prims under /World/spot by name so TF_Articulation
+# publishes only joint frames, not sensor prims like PandarXT_32_10hz.
+LEG_PRIM_NAMES = {
+    "fl_hip", "fl_uleg", "fl_lleg", "fl_foot",
+    "fr_hip", "fr_uleg", "fr_lleg", "fr_foot",
+    "hl_hip", "hl_uleg", "hl_lleg", "hl_foot",
+    "hr_hip", "hr_uleg", "hr_lleg", "hr_foot",
+}
+
+# JointState remapper: Isaac publishes joint names like 'fl_hx', but the Spot
+# URDF (used by robot_state_publisher) expects 'front_left_hip_x'.
+LEG_PREFIX = {"fl": "front_left", "fr": "front_right", "hl": "rear_left", "hr": "rear_right"}
+JOINT_SUFFIX = {"hx": "hip_x", "hy": "hip_y", "kn": "knee"}
+
+# Optical-frame correction for USD cameras: maps URDF link frame (+X forward,
+# +Y left, +Z up) to USD camera frame (-Z forward, +X right, +Y up).
+# Quaternion derived from the basis change camera->link = [[0,0,-1],[-1,0,0],[0,1,0]].
+OPTICAL_QUAT = (0.5, -0.5, -0.5, 0.5)
+
 STATUS_LABEL = None
 LAST_STATUS_LOG_TIME = 0.0
 SCENARIO_RUNNER = None
-
-# STARTUP_SEATED_PEOPLE = {
-#     "Female_visitor_02": "/World/hospital/SM_Chair_02a7",
-#     "Male_visitor_02": "/World/hospital/SM_Chair_02a5",
-#     "Male_visitor_01": "/World/hospital/SM_Chair_02a4",
-#     "Male_patient_04": "/World/hospital/SM_WheelChair_01a4",
-#     "Female_patient_05": "/World/hospital/SM_Chair_01a7",
-#     "Male_patient_05": "/World/hospital/SM_Chair_01a12",
-#     "Female_nurse_02": "/World/hospital/SM_Chair_01a13",
-#     "Male_patient_01": "/World/hospital/SM_Chair_01a3",
-# }
 
 
 def enable_people_extensions() -> None:
@@ -899,101 +1003,6 @@ from sensor_msgs.msg import JointState
 first_step = True
 reset_needed = False
 
-parser = argparse.ArgumentParser()
-parser.add_argument("--test", default=False, action="store_true", help="Run in test mode")
-args, unknown = parser.parse_known_args()
-
-# Scale factors mapping real-world cmd_vel (m/s, m/s, rad/s) to the policy's
-# internal command space. SpotFlatTerrainPolicy was trained with vx/vy in
-# roughly the 0.5–2.0 range and yaw_rate up to ~2.0 rad/s.
-# Tune CMD_SCALE so that 1.0 m/s from ROS maps to a comfortable walking gait.
-CMD_SCALE = np.array([1.44, 1.44, 1.480140971])  # [vx_scale, vy_scale, yaw_scale]
-
-# Deadband threshold (m/s, m/s, rad/s). Below this, use CMD_IDLE instead.
-CMD_DEADBAND = np.array([0.05, 0.05, 0.05])
-
-# Minimum command injected when zero is received, keeps the policy in a stable
-# walking gait rather than drifting/twisting from a dead-stop command.
-CMD_IDLE = np.array([0.0, 0.0, 0.05])
-
-
-# ---------------------------------------------------------------------------
-# Sensor mount configuration (body-relative, URDF convention: +X fwd, +Y left,
-# +Z up). All angles are in radians (URDF intrinsic XYZ rpy). These are the
-# single source of truth for both ROS TF (body → <sensor>) and USD camera
-# authoring of the new fisheye prims.
-# ---------------------------------------------------------------------------
-# Existing sensor mounts (TF only — the prims themselves already exist in USD).
-SENSOR_LASER_TRANS = (0.223, 0.0, 0.1271)
-SENSOR_LASER_RPY = (0.0, 0.0, 0.0)
-
-SENSOR_FRONT_CAMERA_TRANS = (0.26, 0.0, 0.17)
-SENSOR_FRONT_CAMERA_RPY = (0.0, 0.0, 0.0)
-
-SENSOR_REALSENSE_TRANS = (0.45, 0.0, 0.07)
-SENSOR_REALSENSE_RPY = (0.0, 0.872665, 0.0)
-
-SENSOR_IMU_TRANS = (0.0, 0.0, 0.0)
-SENSOR_IMU_RPY = (0.0, 0.0, 0.0)
-
-# Feature toggles
-ENABLE_FISHEYE_CAMERAS = True
-ENABLE_REALSENSE = False
-# Publish leg-link TFs from Isaac Sim. Set False when an external
-# robot_state_publisher with the Spot URDF is running, otherwise the two will
-# emit conflicting TFs (Isaac uses flat USD prim names, URDF nests them).
-ENABLE_LEG_TF = False
-
-# Number of PhysX CPU worker threads. Keep this >=4 to avoid the
-# physics step falling behind real time, which would make /clock advance
-# unevenly and produce jittery sensor timestamps downstream.
-PHYSICS_NUM_THREADS = 12
-
-PHYSICS_DT = 1 / 500
-RENDERING_DT = 1 / 50
-
-# Body-mounted fisheye cameras (left/right/back). Each tuple is:
-#   (name, translation_xyz_m, rpy_rad, horizontal_fov_rad)
-FISHEYE_CAMERA_SPECS = [
-    ("left_fisheye",  (-0.125,  0.12, 0.035), (0.0, 0.2,  1.5707963267948966), 1.78634),
-    ("right_fisheye", (-0.125, -0.12, 0.035), (0.0, 0.2, -1.5707963267948966), 1.78634),
-    ("back_fisheye",  (-0.425,  0.0,  0.01),  (0.0, 0.3,  3.1415926535897931), 1.78634),
-]
-FISHEYE_RES = (640, 480)
-FISHEYE_FOCAL_LEN_MM = 1.4
-FISHEYE_CLIP_RANGE = (0.05, 1000.0)
-
-# ---------------------------------------------------------------------------
-# ROS2 topic names
-# ---------------------------------------------------------------------------
-TOPIC_CLOCK              = "clock"
-TOPIC_LIDAR_POINT_CLOUD  = "point_cloud"
-TOPIC_ODOM               = "odom"
-TOPIC_IMU                = "imu/data"
-TOPIC_TF_STATIC          = "tf_static"
-TOPIC_ISAAC_JOINT_STATES = "isaac_joint_states"
-TOPIC_JOINT_STATES       = "joint_states"
-TOPIC_FRONT_CAMERA_IMAGE = "camera/rgb/image_raw"
-TOPIC_REALSENSE_COLOR    = "realsense/camera"
-TOPIC_REALSENSE_DEPTH    = "realsense/depth/points"
-TOPIC_CMD_VEL            = "cmd_vel"
-
-# Set True to subscribe to geometry_msgs/TwistStamped instead of Twist.
-# Nav2 / ros2_control publish TwistStamped by default in ROS 2 Jazzy.
-CMD_VEL_STAMPED = True
-
-# ---------------------------------------------------------------------------
-# ROS2 / TF frame names
-# ---------------------------------------------------------------------------
-FRAME_ODOM         = "odom"
-FRAME_BASE_LINK    = "base_link"
-FRAME_BODY         = "body"
-FRAME_LASER        = "laser"
-FRAME_FRONT_CAMERA = "front_camera"
-FRAME_IMU          = "imu"
-FRAME_REALSENSE    = "realsense"
-
-
 def _rpy_to_quat(rpy):
     """URDF rpy (radians) → quaternion (x, y, z, w). Order: R_z * R_y * R_x."""
     r, p, y = rpy
@@ -1017,13 +1026,6 @@ def _quat_mul(q1, q2):
         w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
         w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
     )
-
-
-# Optical-frame correction for USD cameras: maps URDF link frame (+X forward,
-# +Y left, +Z up) to USD camera frame (-Z forward, +X right, +Y up).
-# Quaternion derived from the basis change camera→link = [[0,0,-1],[-1,0,0],[0,1,0]].
-_OPTICAL_QUAT = (0.5, -0.5, -0.5, 0.5)
-
 
 
 # initialize robot on first step, run robot advance
@@ -1055,8 +1057,7 @@ my_world = World(stage_units_in_meters=1.0, physics_dt=PHYSICS_DT, rendering_dt=
 # Reuse the stage that people_control_sim.py opened. Do not add a second
 # hospital reference here; that can leave the people extension looking at stale
 # character prims from a different composition path.
-asset_path = USD_PATH
-print(f"[spot_bridge_with_people] Using people-loaded stage: {asset_path}")
+print(f"[spot_bridge_with_people] Using people-loaded stage: {USD_PATH}")
 
 # spawn robot
 spot = SpotFlatTerrainPolicy(
@@ -1088,11 +1089,6 @@ for _p in _stage.Traverse():
 # fisheyes (~110° HFOV). We author them as USD Camera prims under /World/spot/body
 # at body-relative offsets, then publish each via its own ROS2 camera graph.
 #
-# UsdGeom.Camera convention: camera looks down its local -Z axis, with +X right
-# and +Y up. To aim along body's +Y (left), -Y (right), or -X (back), rotate
-# accordingly. Roll keeps the image upright (image +Y aligned with body +Z).
-SPOT_BODY_PRIM = "/World/spot/body"
-
 # Author the additional fisheye camera prims (left/right/back) under
 # /World/spot/body. Translation/rotation come from FISHEYE_CAMERA_SPECS at the
 # top of the file. The USD camera is rotated by (link_rpy * optical_correction)
@@ -1107,7 +1103,7 @@ if ENABLE_FISHEYE_CAMERAS:
         _xf.ClearXformOpOrder()
         _xf.AddTranslateOp().Set(Gf.Vec3d(*_xyz))
         _link_q = _rpy_to_quat(_rpy_rad)
-        _cam_q = _quat_mul(_link_q, _OPTICAL_QUAT)
+        _cam_q = _quat_mul(_link_q, OPTICAL_QUAT)
         _qx, _qy, _qz, _qw = _cam_q
         _xf.AddOrientOp().Set(Gf.Quatf(_qw, Gf.Vec3f(_qx, _qy, _qz)))
         # Aperture from HFOV: h_aperture = 2 * focal * tan(hfov/2)
@@ -1122,10 +1118,7 @@ if ENABLE_FISHEYE_CAMERAS:
 else:
     print("[spot_bridge_with_people] Fisheye cameras disabled (ENABLE_FISHEYE_CAMERAS=False)")
 
-
-
-IMU_PRIM_PATH = SPOT_BODY_PRIM + "/imu_sensor"
-_, imu_sensor = omni.kit.commands.execute(
+omni.kit.commands.execute(
     "IsaacSensorCreateImuSensor",
     path="/imu_sensor",
     parent=SPOT_BODY_PRIM,
@@ -1156,14 +1149,6 @@ try:
 except Exception as e:
     carb.log_error(f"Failed to create clock graph: {e}")
 
-# Build a ROS2 RTX Lidar publisher action graph
-# References the lidar camera prim already authored in the USD scene
-LIDAR_CAMERA_PRIM = "/World/spot/body/XT_32/PandarXT_32_10hz"
-# Xform mounts used for TF (physical attachment points on the body)
-_FRONT_CAMERA_XFORM = "/World/spot/body/Camera_SG2_OX03CC_5200_GMSL2_H60YA"
-REALSENSE_PRIM = "/World/spot/rsd455"
-
-
 def _find_camera_prims_under(root_path: str):
     """Find Camera prims under root_path.
     Accepts UsdGeom.Camera prims and any Isaac-specific type whose name contains 'camera'.
@@ -1183,9 +1168,6 @@ def _frame_id_from_prim_path(prim_path: str, fallback: str) -> str:
 
 
 def _select_realsense_camera_prims(camera_prims: list[str]):
-    if not ENABLE_REALSENSE:
-        print("[spot_bridge_with_people] RealSense disabled (ENABLE_REALSENSE=False)")
-        return None, None, FRAME_REALSENSE, FRAME_REALSENSE
     if not camera_prims:
         carb.log_warn("[spot_bridge_with_people] No Camera prims found under rsd455 — RealSense graphs skipped")
         return None, None, FRAME_REALSENSE, FRAME_REALSENSE
@@ -1203,50 +1185,55 @@ def _select_realsense_camera_prims(camera_prims: list[str]):
 
 # Auto-discover the actual Camera prim inside the front camera xform.
 # The outer xform and the inner Camera often share the same name.
-_fc_cams = _find_camera_prims_under(_FRONT_CAMERA_XFORM)
-FRONT_CAMERA_PRIM = _fc_cams[0] if _fc_cams else _FRONT_CAMERA_XFORM
+_fc_cams = _find_camera_prims_under(FRONT_CAMERA_XFORM)
+FRONT_CAMERA_PRIM = _fc_cams[0] if _fc_cams else FRONT_CAMERA_XFORM
 print(f"[spot_bridge_with_people] Front camera prim: {FRONT_CAMERA_PRIM}")
 
-# Auto-discover RealSense Camera prims; try body-mounted path as fallback.
-_rs_root = REALSENSE_PRIM
-_rs_cams = _find_camera_prims_under(_rs_root)
-if not _rs_cams:
-    _rs_root = "/World/spot/body/rsd455"
+
+def configure_front_camera_as_fisheye() -> None:
+    prim = _stage.GetPrimAtPath(FRONT_CAMERA_PRIM)
+    camera = UsdGeom.Camera(prim)
+    if not camera:
+        carb.log_warn(f"[spot_bridge_with_people] Cannot configure front camera as fisheye; not a USD Camera: {FRONT_CAMERA_PRIM}")
+        return
+
+    h_ap = 2.0 * FISHEYE_FOCAL_LEN_MM * math.tan(FRONT_CAMERA_FISHEYE_HFOV_RAD * 0.5)
+    v_ap = h_ap * FRONT_CAMERA_RES[1] / FRONT_CAMERA_RES[0]
+    camera.GetFocalLengthAttr().Set(FISHEYE_FOCAL_LEN_MM)
+    camera.GetHorizontalApertureAttr().Set(h_ap)
+    camera.GetVerticalApertureAttr().Set(v_ap)
+    camera.GetClippingRangeAttr().Set(Gf.Vec2f(*FISHEYE_CLIP_RANGE))
+    print(f"[spot_bridge_with_people] Front camera configured as fisheye-style camera: {FRONT_CAMERA_PRIM}")
+
+
+if FRONT_CAMERA_AS_FISHEYE:
+    configure_front_camera_as_fisheye()
+
+if ENABLE_REALSENSE:
+    # Auto-discover RealSense Camera prims; try body-mounted path as fallback.
+    _rs_root = REALSENSE_PRIM
     _rs_cams = _find_camera_prims_under(_rs_root)
-if _rs_cams:
-    print(f"[spot_bridge_with_people] RealSense camera prims found under {_rs_root}: {_rs_cams}")
+    if not _rs_cams:
+        _rs_root = "/World/spot/body/rsd455"
+        _rs_cams = _find_camera_prims_under(_rs_root)
+    if _rs_cams:
+        print(f"[spot_bridge_with_people] RealSense camera prims found under {_rs_root}: {_rs_cams}")
+    else:
+        # Dump all descendant prim types so we can identify the right path/type
+        for _candidate in [REALSENSE_PRIM, "/World/spot/body/rsd455"]:
+            for _p in _stage.Traverse():
+                _pp = str(_p.GetPath())
+                if _pp.startswith(_candidate + "/"):
+                    carb.log_warn(f"[spot_bridge_with_people] rsd455 child: {_pp}  type={_p.GetTypeName()}")
+    REALSENSE_COLOR_CAM, REALSENSE_DEPTH_CAM, FRAME_REALSENSE_COLOR, FRAME_REALSENSE_DEPTH = _select_realsense_camera_prims(_rs_cams)
 else:
-    # Dump all descendant prim types so we can identify the right path/type
-    for _candidate in [REALSENSE_PRIM, "/World/spot/body/rsd455"]:
-        for _p in _stage.Traverse():
-            _pp = str(_p.GetPath())
-            if _pp.startswith(_candidate + "/"):
-                carb.log_warn(f"[spot_bridge_with_people] rsd455 child: {_pp}  type={_p.GetTypeName()}")
-
-REALSENSE_COLOR_CAM, REALSENSE_DEPTH_CAM, FRAME_REALSENSE_COLOR, FRAME_REALSENSE_DEPTH = _select_realsense_camera_prims(_rs_cams)
-
-
-def _body_rel_tf(prim_path: str):
-    """Return (translation [x,y,z], rotation [i,j,k,r]) of prim_path relative to body.
-
-    Uses USD authored transforms read once at startup — valid because sensor
-    mounts are rigid (no runtime joint between body and the sensor prims).
-    USD uses row-vector convention: M_rel = M_prim_world * M_body_world_inv
-    which maps points from the sensor frame into the body frame, matching the
-    ROS2 TF parent→child convention (child origin expressed in parent frame).
-    """
-    try:
-        _t = Usd.TimeCode.Default()
-        _bw = UsdGeom.Xformable(_stage.GetPrimAtPath(SPOT_BODY_PRIM)).ComputeLocalToWorldTransform(_t)
-        _pw = UsdGeom.Xformable(_stage.GetPrimAtPath(prim_path)).ComputeLocalToWorldTransform(_t)
-        _rel = _pw * _bw.GetInverse()
-        _tr = _rel.ExtractTranslation()
-        _q = Gf.Rotation(_rel.ExtractRotationMatrix()).GetQuat()
-        _im = _q.GetImaginary()
-        return [float(_tr[0]), float(_tr[1]), float(_tr[2])], [float(_im[0]), float(_im[1]), float(_im[2]), float(_q.GetReal())]
-    except Exception as _e:
-        carb.log_warn(f"[spot_bridge_with_people] Could not compute TF for {prim_path}: {_e}. Using identity.")
-        return [0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0]
+    print("[spot_bridge_with_people] RealSense disabled (ENABLE_REALSENSE=False)")
+    REALSENSE_COLOR_CAM, REALSENSE_DEPTH_CAM, FRAME_REALSENSE_COLOR, FRAME_REALSENSE_DEPTH = (
+        None,
+        None,
+        FRAME_REALSENSE,
+        FRAME_REALSENSE,
+    )
 
 
 LASER_TF_TRANS = list(SENSOR_LASER_TRANS)
@@ -1261,23 +1248,17 @@ IMU_TF_ROT = list(_rpy_to_quat(SENSOR_IMU_RPY))
 
 # Body-relative TFs for the three additional fisheye cameras (link RPY only —
 # no optical correction; the published TF describes the URDF-style link frame).
-_BODY_CAMERA_TFS = {
-    _name: (list(_xyz), list(_rpy_to_quat(_rpy)))
-    for _name, _xyz, _rpy, _hfov in FISHEYE_CAMERA_SPECS
-}
+_BODY_CAMERA_TFS = {}
+if ENABLE_FISHEYE_CAMERAS:
+    _BODY_CAMERA_TFS = {
+        _name: (list(_xyz), list(_rpy_to_quat(_rpy)))
+        for _name, _xyz, _rpy, _hfov in FISHEYE_CAMERA_SPECS
+    }
 
-# Discover the 16 leg link prims under /World/spot by name so TF_Articulation
-# publishes only joint frames — not sensor prims like PandarXT_32_10hz.
-_LEG_PRIM_NAMES = {
-    "fl_hip", "fl_uleg", "fl_lleg", "fl_foot",
-    "fr_hip", "fr_uleg", "fr_lleg", "fr_foot",
-    "hl_hip", "hl_uleg", "hl_lleg", "hl_foot",
-    "hr_hip", "hr_uleg", "hr_lleg", "hr_foot",
-}
 LEG_PRIMS = [
     str(_p.GetPath())
     for _p in _stage.Traverse()
-    if str(_p.GetPath()).startswith("/World/spot/") and str(_p.GetPath()).split("/")[-1] in _LEG_PRIM_NAMES
+    if str(_p.GetPath()).startswith("/World/spot/") and str(_p.GetPath()).split("/")[-1] in LEG_PRIM_NAMES
 ]
 if not LEG_PRIMS:
     carb.log_warn("[spot_bridge_with_people] No leg prims found under /World/spot — check prim names in USD")
@@ -1586,8 +1567,8 @@ try:
             og.Controller.Keys.SET_VALUES: [
                 ("RenderProduct.inputs:cameraPrim", [FRONT_CAMERA_PRIM]),
                 ("RenderProduct.inputs:enabled", True),
-                ("RenderProduct.inputs:width", 1280),
-                ("RenderProduct.inputs:height", 720),
+                ("RenderProduct.inputs:width", FRONT_CAMERA_RES[0]),
+                ("RenderProduct.inputs:height", FRONT_CAMERA_RES[1]),
                 ("CameraHelper.inputs:topicName", TOPIC_FRONT_CAMERA_IMAGE),
                 ("CameraHelper.inputs:type", "rgb"),
                 ("CameraHelper.inputs:frameId", FRAME_FRONT_CAMERA),
@@ -1738,17 +1719,11 @@ else:
 
 cmd_vel_sub = ros_node.create_subscription(_cmd_vel_msg_type, TOPIC_CMD_VEL, cmd_vel_callback, 10)
 
-# JointState remapper: Isaac publishes joint names like 'fl_hx', but the Spot
-# URDF (used by robot_state_publisher) expects 'front_left_hip_x'. Subscribe to
-# /isaac_joint_states and republish to /joint_states with renamed joints.
-_LEG_PREFIX = {"fl": "front_left", "fr": "front_right", "hl": "rear_left", "hr": "rear_right"}
-_JOINT_SUFFIX = {"hx": "hip_x", "hy": "hip_y", "kn": "knee"}
-
 
 def _remap_joint_name(name: str) -> str:
     parts = name.split("_")
-    if len(parts) == 2 and parts[0] in _LEG_PREFIX and parts[1] in _JOINT_SUFFIX:
-        return f"{_LEG_PREFIX[parts[0]]}_{_JOINT_SUFFIX[parts[1]]}"
+    if len(parts) == 2 and parts[0] in LEG_PREFIX and parts[1] in JOINT_SUFFIX:
+        return f"{LEG_PREFIX[parts[0]]}_{JOINT_SUFFIX[parts[1]]}"
     return name
 
 

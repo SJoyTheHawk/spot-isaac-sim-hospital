@@ -1,4 +1,4 @@
-# spot-isaac-lab-hospital
+# Spot Isaac Sim Hospital
 
 **Version 2.0**
 
@@ -68,8 +68,8 @@ Pressing **START** should bring up an empty Isaac Sim stage:
 
 ```bash
 # 1. Clone
-git clone https://github.com/SJoyTheHawk/spot-isaac-lab-hospital.git
-cd spot-isaac-lab-hospital
+git clone https://github.com/SJoyTheHawk/spot-isaac-sim-hospital.git
+cd spot-isaac-sim-hospital
 
 # 2. Configure for your machine
 cp env/spot_isaac.env.template env/spot_isaac.env
@@ -116,9 +116,14 @@ people scripts at runtime.
 
 People scenario captures:
 
-- [Initialize people](docs/initialize_people.mp4)
-- [People feature demo 1](docs/people_feature_1.mp4)
-- [People feature demo 2](docs/people_feature_2.mp4)
+<img src="docs/photos/people_simulation/initialize_people.gif" width="800" title="Initialize saved people in the character-enabled hospital scene"/>
+
+<table>
+  <tr>
+    <td><img src="docs/photos/people_simulation/people_feature_1.gif" width="390" title="People simulation feature demo 1"/></td>
+    <td><img src="docs/photos/people_simulation/people_feature_2.gif" width="390" title="People simulation feature demo 2"/></td>
+  </tr>
+</table>
 
 ### Option B — Spot only
 
@@ -302,7 +307,7 @@ when a camera optical point cloud is visualized against a body-style mount TF.
 
 <img src="docs/photos/ros_topic/costmap.png" width="800" title="RViz2 costmap for the hospital Nav2 setup"/>
 
-[Point cloud RViz video](docs/photos/ros_topic/point_cloud_rviz.mp4)
+<img src="docs/photos/ros_topic/point_cloud_rviz.gif" width="600" title="RViz2 point cloud playback"/>
 
 ### Camera streams
 
@@ -376,6 +381,7 @@ and adds people setup before the ROS 2 bridge is enabled:
 | `CMD_SCALE`                 | `np.ndarray` | Maps `/cmd_vel` to RL policy command space |
 | `CMD_VEL_STAMPED`           | `bool` | `True` for Nav2/ros2_control (TwistStamped)  |
 | `ENABLE_FISHEYE_CAMERAS`    | `bool` | Add 3 body fisheye cameras (left/right/back). May slow simulation — increase `PHYSICS_NUM_THREADS` if needed |
+| `FRONT_CAMERA_AS_FISHEYE`   | `bool` | Reconfigure the existing front camera as a fisheye-style camera while keeping the same ROS topic and TF frame |
 | `ENABLE_REALSENSE`          | `bool` | Enable the RealSense D455 color/depth publishers. May slow simulation — increase `PHYSICS_NUM_THREADS` if needed |
 | `ENABLE_LEG_TF`             | `bool` | Publish leg TFs from Isaac (off by default)  |
 | `SENSOR_(SENSOR_NAME)_TRANS` / `_RPY` | `tuple` | TF mounts for laser, front cam, IMU, etc. |
@@ -416,7 +422,8 @@ see [`docs/RUN_SIMULATION.md`](docs/RUN_SIMULATION.md).
 │   ├── run_people_sim.sh       # launch the character-control scene and UI
 │   ├── run_ros2.sh             # launch robot_state_publisher
 │   └── dump_scene_positions.py # dump prim poses to /tmp/scene_positions.txt
-├── docs/photos/                # screenshots used in this README
+├── docs/photos/                # screenshots and GIF captures used in this README
+├── docs/original_videos/       # source MP4 captures used to generate README GIFs
 └── env/
     └── spot_isaac.env.template # copy → spot_isaac.env, edit for your machine
 ```
@@ -437,6 +444,10 @@ useful for showing the costmap, TF tree, raw point cloud, RealSense color /
 depth point cloud, and the camera streams while the robot moves through the
 front desk area.
 
+<img src="docs/photos/nav2_extra/nav2_demo_trimmed.gif" width="800" title="Nav2 demo with Spot navigating through the hospital front desk area"/>
+
+Full navigation video: [`docs/original_videos/nav2_demo.mp4`](docs/original_videos/nav2_demo.mp4)
+
 <img src="ros2_ws/src/spot_hospital_bringup/maps/spot_hospital_map.png" width="800" title="Nav2 occupancy map of the hospital environment"/>
 
 ---
@@ -447,6 +458,9 @@ front desk area.
 Reduce `PHYSICS_NUM_THREADS` only if you have < 8 cores; otherwise try
 increasing `physics_dt` from `1/500` toward `1/200`.
 
+**Low FPS or sluggish simulation** — extra camera render products are expensive.
+Set `ENABLE_FISHEYE_CAMERAS = False` and `ENABLE_REALSENSE = False` first if the simulation feels slow, especially on lower-end GPUs or when running people, Nav2, RViz, and multiple camera streams together.
+
 **`IsaacComputeOdometry` shape error** — extra `RigidBodyAPI`s are nested
 under `/World/spot/body/`. The script strips these automatically; if you see
 the error, check that the USD reference resolved correctly.
@@ -454,17 +468,6 @@ the error, check that the USD reference resolved correctly.
 **Conflicting TF emitters** — Isaac and `robot_state_publisher` both publish
 leg TFs by default. Keep `ENABLE_LEG_TF = False` and let
 `robot_state_publisher` own the URDF kinematic tree.
-
-**People are stuck in T-pose** — check the startup log from
-`run_spot_bridge_with_people.sh`. You should see nonzero
-`Registered people agents`. The combined bridge removes stale behavior scripts
-from non-`SkelRoot` child prims and initializes only valid character roots.
-
-**RealSense point cloud appears rolled or flipped** — use the camera frame from
-the point cloud header, usually `Camera_Pseudo_Depth`, as the RViz fixed or
-target frame. The generic `realsense` TF is a body-style mount frame kept for
-compatibility, while the point cloud is emitted in the actual depth camera
-frame.
 
 **"Authoring to instance proxy not allowed"** — when adding lights or other
 prims, write them under `/World/hospital/Inhouse_Light/` (outside the
@@ -475,15 +478,30 @@ instanced hospital reference), not inside `/World`.
 ## Media Still To Add
 
 - [ ] GIF of `/cmd_vel` robot control with `rqt_robot_steering`
-- [ ] GIF of Nav2 navigating through the front desk area
 
 ---
 
 ## License
 
-Apache-2.0. The Spot URDF and Isaac Sim assets are subject to their
-respective upstream licenses (NVIDIA Isaac Sim assets, Boston Dynamics Spot
-description).
+Copyright 2026 Johnny Sze.
+
+Company/contact: Rocky Road Studio, <rockyroadstudio@outlook.com>.
+
+Project source code and original repository documentation are licensed under
+Apache-2.0. Screenshots, videos, and GIFs in this repository were generated by
+the project owner.
+
+NVIDIA Isaac Sim source code is Apache-2.0, but NVIDIA-provided runtime
+components and assets, including Omniverse Kit, 3D models, and textures, are
+covered by NVIDIA's Isaac Sim Additional Software and Materials License. The
+USD scenes in this repository are intended to be used with a locally installed
+Isaac Sim environment and its asset libraries; NVIDIA assets are not relicensed
+under this repository's Apache-2.0 license.
+
+Useful NVIDIA license references:
+
+- Isaac Sim License FAQ: <https://docs.isaacsim.omniverse.nvidia.com/latest/common/license-faq.html>
+- Isaac Sim Additional Software and Materials License: <https://www.nvidia.com/en-us/agreements/enterprise-software/isaac-sim-additional-software-and-materials-license/>
 
 ## Sponsor Me (With Thanks)
 

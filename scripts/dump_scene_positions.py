@@ -8,7 +8,7 @@ Orientation is reported as:
   - intrinsic XYZ Euler angles in degrees (roll, pitch, yaw)
 
 Usage (from the repo root):
-    cd /path/to/spot-isaac-lab-hospital
+    cd /path/to/spot-isaac-sim-hospital
     ./scripts/run_isaac.sh ./scripts/dump_scene_positions.py \
         [--lights-only] [--xformable-only] [--usd <path>] [--out <file>]
 
