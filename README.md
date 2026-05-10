@@ -304,10 +304,13 @@ when a camera optical point cloud is visualized against a body-style mount TF.
 ### ROS / RViz captures
 
 <img src="docs/photos/ros_topic/realsense_topic_rviz.png" width="800" title="RealSense color image and depth point cloud in RViz2"/>
-
-<img src="docs/photos/ros_topic/costmap.png" width="800" title="RViz2 costmap for the hospital Nav2 setup"/>
+Realsense 455i data visualization
 
 <img src="docs/photos/ros_topic/point_cloud_rviz.gif" width="600" title="RViz2 point cloud playback"/>
+Point Cloud data visualization
+
+<img src="docs/photos/ros_topic/costmap.png" width="800" title="RViz2 costmap for the hospital Nav2 setup"/>
+Costmap loaded in Nav2
 
 ### Camera streams
 
@@ -388,7 +391,6 @@ and adds people setup before the ROS 2 bridge is enabled:
 
 For details about `scripts/run_isaac.sh` and `isaac_sim/spot_standalone.py`,
 see [`docs/RUN_SIMULATION.md`](docs/RUN_SIMULATION.md).
-
 
 
 ---
@@ -472,12 +474,6 @@ leg TFs by default. Keep `ENABLE_LEG_TF = False` and let
 **"Authoring to instance proxy not allowed"** — when adding lights or other
 prims, write them under `/World/hospital/Inhouse_Light/` (outside the
 instanced hospital reference), not inside `/World`.
-
----
-
-## Media Still To Add
-
-- [ ] GIF of `/cmd_vel` robot control with `rqt_robot_steering`
 
 ---
 
