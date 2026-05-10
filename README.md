@@ -308,9 +308,11 @@ Realsense 455i data visualization
 <img src="docs/photos/ros_topic/realsense_topic_rviz.png" width="800" title="RealSense color image and depth point cloud in RViz2"/>
 
 Point Cloud data visualization
+
 <img src="docs/photos/ros_topic/point_cloud_rviz.gif" width="600" title="RViz2 point cloud playback"/>
 
 Costmap loaded in Nav2
+
 <img src="docs/photos/ros_topic/costmap.png" width="800" title="RViz2 costmap for the hospital Nav2 setup"/>
 
 ### Camera streams
