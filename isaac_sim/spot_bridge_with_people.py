@@ -6,13 +6,93 @@ stage, one Spot ROS bridge, and one people simulation without importing either
 standalone script.
 """
 
-from isaacsim import SimulationApp
-
-simulation_app = SimulationApp({"headless": False})
-
 import math
 import os
+import random
 import time
+
+from isaacsim import SimulationApp
+
+
+def _env_flag(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None or value.strip() == "":
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str, default: int) -> int:
+    value = os.environ.get(name)
+    if value is None or value.strip() == "":
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        print(f"[spot_bridge_with_people] Ignoring invalid {name}={value!r}; using {default}.", flush=True)
+        return default
+
+
+def _env_optional_int(name: str) -> int | None:
+    value = os.environ.get(name)
+    if value is None or value.strip() == "":
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        print(f"[spot_bridge_with_people] Ignoring invalid {name}={value!r}.", flush=True)
+        return None
+
+
+ISAAC_HEADLESS = _env_flag("SPOT_ISAAC_HEADLESS", False)
+ISAAC_MULTI_GPU = _env_flag("SPOT_ISAAC_MULTI_GPU", False)
+ISAAC_ANTI_ALIASING = _env_int("SPOT_ISAAC_ANTI_ALIASING", 1)
+ISAAC_RENDERER = os.environ.get("SPOT_ISAAC_RENDERER", "").strip() or "RaytracedLighting"
+ISAAC_CREATE_NEW_STAGE = _env_flag("SPOT_ISAAC_CREATE_NEW_STAGE", False)
+
+ISAAC_LAUNCH_CONFIG = {
+    "headless": ISAAC_HEADLESS,
+    "multi_gpu": ISAAC_MULTI_GPU,
+    "renderer": ISAAC_RENDERER,
+    "anti_aliasing": ISAAC_ANTI_ALIASING,
+    "create_new_stage": ISAAC_CREATE_NEW_STAGE,
+    "width": _env_int("SPOT_ISAAC_WIDTH", 1280),
+    "height": _env_int("SPOT_ISAAC_HEIGHT", 720),
+    "window_width": _env_int("SPOT_ISAAC_WINDOW_WIDTH", 1440),
+    "window_height": _env_int("SPOT_ISAAC_WINDOW_HEIGHT", 900),
+    "extra_args": [
+        f"--/rtx/post/aa/op={ISAAC_ANTI_ALIASING}",
+        f"--/rtx-defaults/post/aa/op={ISAAC_ANTI_ALIASING}",
+        f"--/rtx/rendermode={ISAAC_RENDERER}",
+        f"--/rtx-defaults/rendermode={ISAAC_RENDERER}",
+    ],
+}
+
+if _env_flag("SPOT_ISAAC_DISABLE_STARTUP_VIEWPORT", ISAAC_HEADLESS):
+    ISAAC_LAUNCH_CONFIG["extra_args"].extend(
+        [
+            "--/exts/omni.kit.viewport.window/startup/disableWindowOnLoad=true",
+            "--/exts/omni.kit.viewport.window/startup/showOnLaunch=[]",
+            "--/exts/omni.kit.widget.viewport/autoAttach/mode=0",
+        ]
+    )
+
+if not ISAAC_MULTI_GPU:
+    ISAAC_LAUNCH_CONFIG["max_gpu_count"] = 1
+
+ISAAC_MAX_GPU_COUNT = _env_optional_int("SPOT_ISAAC_MAX_GPU_COUNT")
+if ISAAC_MAX_GPU_COUNT is not None:
+    ISAAC_LAUNCH_CONFIG["max_gpu_count"] = ISAAC_MAX_GPU_COUNT
+
+print(
+    "[spot_bridge_with_people] Isaac launch: "
+    f"headless={ISAAC_HEADLESS}, renderer={ISAAC_RENDERER}, "
+    f"anti_aliasing={ISAAC_ANTI_ALIASING}, multi_gpu={ISAAC_MULTI_GPU}, "
+    f"create_new_stage={ISAAC_CREATE_NEW_STAGE}, "
+    f"max_gpu_count={ISAAC_LAUNCH_CONFIG.get('max_gpu_count', 'all')}",
+    flush=True,
+)
+
+simulation_app = SimulationApp(ISAAC_LAUNCH_CONFIG)
 
 import carb
 import carb.settings
@@ -24,14 +104,15 @@ import omni.ui as ui
 import omni.usd
 import yaml
 from isaacsim.core.api import World
+from isaacsim.core.deprecation_manager import import_module
 from isaacsim.core.utils.extensions import enable_extension
 from isaacsim.robot.policy.examples.robots import SpotFlatTerrainPolicy
-from omni.kit.scripting.scripts.script_manager import ScriptManager
-from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics
+from omni.behavior.scripting.core.scripts.script_manager import ScriptManager
+from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics, UsdSkel
 
 
 REPO_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
-DEFAULT_PEOPLE_USD = os.path.join(REPO_DIR, "assets", "isaac_hospital_scene_spot_w_characters.usd")
+DEFAULT_PEOPLE_USD = os.path.join(REPO_DIR, "assets", "isaac_hospital_scene_spot_w_characters_6.usd")
 USD_PATH = os.path.realpath(os.environ.get("SPOT_PEOPLE_USD", DEFAULT_PEOPLE_USD))
 COMMANDS_YAML_FILE = os.path.realpath(
     os.environ.get("PEOPLE_INITIAL_COMMANDS", os.path.join(REPO_DIR, "assets", "people_initial_commands.yaml"))
@@ -43,6 +124,10 @@ PEOPLE_COMMAND_FILE_IS_DEFAULT = PEOPLE_COMMAND_FILE == os.path.realpath(
     os.path.join("/tmp", "spot_isaac_people_runtime_commands.txt")
 )
 CHARACTER_ROOT = "/World/Characters"
+MOTION_LIBRARY_PRIM_PATH = f"{CHARACTER_ROOT}/HumanMotionLibrary"
+LOOK_AT_DEFAULT_DURATION = 8.0
+LOOK_AT_DEFAULT_RADIUS = 4.0
+LOOK_AT_DEFAULT_HEIGHT = 1.45
 
 # Scale factors mapping real-world cmd_vel (m/s, m/s, rad/s) to the policy's
 # internal command space. SpotFlatTerrainPolicy was trained with vx/vy in
@@ -165,19 +250,24 @@ OPTICAL_QUAT = (0.5, -0.5, -0.5, 0.5)
 STATUS_LABEL = None
 LAST_STATUS_LOG_TIME = 0.0
 SCENARIO_RUNNER = None
+torch = import_module("torch")
 
 
 def enable_people_extensions() -> None:
-    for ext in [
-        "omni.kit.scripting",
-        "omni.anim.timeline",
+    extensions = [
+        "omni.behavior.scripting.core",
+        "omni.anim.behavior.core",
         "omni.anim.graph.core",
         "omni.anim.retarget.core",
         "omni.anim.navigation.core",
-        "omni.anim.people",
         "isaacsim.replicator.agent.core",
         "omni.kit.mesh.raycast",
-    ]:
+    ]
+    if _env_flag("SPOT_ISAAC_ENABLE_ANIM_TIMELINE", False):
+        extensions.insert(1, "omni.anim.timeline")
+
+    for ext in extensions:
+        print(f"[spot_bridge_with_people] Enabling extension: {ext}", flush=True)
         enable_extension(ext)
     simulation_app.update()
 
@@ -212,12 +302,7 @@ def ensure_people_command_file() -> None:
 def configure_people() -> None:
     ensure_people_command_file()
     settings = carb.settings.get_settings()
-    settings.set("/persistent/exts/omni.anim.people/character_prim_path", CHARACTER_ROOT)
     settings.set("/exts/isaacsim.replicator.agent/characters_parent_prim_path", CHARACTER_ROOT)
-    settings.set("/exts/omni.anim.people/command_settings/command_file_path", PEOPLE_COMMAND_FILE)
-    settings.set("/exts/omni.anim.people/command_settings/number_of_loop", 0)
-    settings.set("/exts/omni.anim.people/navigation_settings/navmesh_enabled", True)
-    settings.set("/exts/omni.anim.people/navigation_settings/dynamic_avoidance_enabled", True)
 
 
 def bake_navmesh() -> None:
@@ -243,21 +328,50 @@ def bake_navmesh() -> None:
 
 def load_people() -> list[str]:
     root = omni.usd.get_context().get_stage().GetPrimAtPath(CHARACTER_ROOT)
+    if not root.IsValid():
+        return []
+
+    skelroots = get_people_skelroots()
+    if skelroots:
+        return sorted(character_display_name(prim) for prim in skelroots)
+
     return [child.GetName() for child in root.GetAllChildren() if child.GetName() != "Biped_Setup"]
 
 
 def get_people_skelroots() -> list:
-    from isaacsim.replicator.agent.core.stage_util import CharacterUtil
+    stage = omni.usd.get_context().get_stage()
+    if stage is None:
+        return []
 
-    return [
-        prim
-        for prim in CharacterUtil.get_characters_in_stage()
-        if str(prim.GetPath()).startswith(f"{CHARACTER_ROOT}/") and "/Biped_Setup/" not in str(prim.GetPath())
-    ]
+    root = stage.GetPrimAtPath(CHARACTER_ROOT)
+    if not root.IsValid():
+        return []
+
+    skelroots = []
+    for prim in Usd.PrimRange(root):
+        if prim == root:
+            continue
+        prim_path = str(prim.GetPath())
+        if "/Biped_Setup/" in prim_path:
+            continue
+        if prim.IsA(UsdSkel.Root) or prim.GetTypeName() == "SkelRoot":
+            skelroots.append(prim)
+
+    return skelroots
 
 
 def get_people_skelroot_paths() -> set[str]:
     return {str(prim.GetPath()) for prim in get_people_skelroots()}
+
+
+def character_display_name(skelroot_prim) -> str:
+    try:
+        parent = skelroot_prim.GetParent()
+        if parent and parent.IsValid() and str(parent.GetPath()).startswith(f"{CHARACTER_ROOT}/"):
+            return parent.GetName()
+    except Exception:
+        pass
+    return skelroot_prim.GetName()
 
 
 def destroy_script_manager_entry(script_manager, prim_path: str) -> int:
@@ -306,8 +420,12 @@ def remove_stale_script_manager_people_instances(valid_paths: set[str]) -> int:
 
 
 def setup_saved_characters() -> None:
-    from isaacsim.replicator.agent.core.settings import BehaviorScriptPaths
-    from isaacsim.replicator.agent.core.stage_util import CharacterUtil
+    try:
+        from isaacsim.replicator.agent.core.settings import BehaviorScriptPaths
+        from isaacsim.replicator.agent.core.stage_util import CharacterUtil
+    except ModuleNotFoundError:
+        print("[spot_bridge_with_people] Legacy character setup API is not available; using Isaac 6 authored characters.")
+        return
 
     biped_prim = CharacterUtil.load_default_biped_to_stage()
     anim_graph = CharacterUtil.get_anim_graph_from_character(biped_prim)
@@ -318,15 +436,106 @@ def setup_saved_characters() -> None:
         simulation_app.update()
 
 
-def init_behavior_scripts() -> None:
-    from isaacsim.replicator.agent.core.agent_manager import AgentManager
+def default_human_motion_library_asset() -> str:
+    settings = carb.settings.get_settings()
+    asset = settings.get("/exts/isaacsim.replicator.agent/default_human_motion_library_asset")
+    if asset:
+        return asset
 
+    try:
+        from omni.metropolis.utils.isaac_sim_util import resolve_asset_path
+    except Exception:
+        return "Isaac/People/MotionLibrary/HumanMotionLibrary.usd"
+
+    return resolve_asset_path("Isaac/People/MotionLibrary/HumanMotionLibrary.usd")
+
+
+def ensure_behavior_motion_library() -> Sdf.Path | None:
+    stage = omni.usd.get_context().get_stage()
+    if stage is None:
+        return None
+
+    motion_library_path = Sdf.Path(MOTION_LIBRARY_PRIM_PATH)
+    prim = stage.GetPrimAtPath(motion_library_path)
+    if prim and prim.IsValid():
+        return motion_library_path
+
+    asset = default_human_motion_library_asset()
+    print(f"[spot_bridge_with_people] Creating Isaac 6 behavior motion library at {MOTION_LIBRARY_PRIM_PATH}")
+    try:
+        omni.kit.commands.execute(
+            "CreatePayloadCommand",
+            usd_context=omni.usd.get_context(),
+            path_to=motion_library_path,
+            asset_path=asset,
+            prim_path=None,
+            instanceable=False,
+            select_prim=False,
+        )
+    except Exception as exc:
+        print(f"[spot_bridge_with_people] Failed to create behavior motion library from {asset}: {exc}")
+        return None
+
+    for _ in range(5):
+        simulation_app.update()
+
+    prim = stage.GetPrimAtPath(motion_library_path)
+    return motion_library_path if prim and prim.IsValid() else None
+
+
+def ensure_behavior_agents() -> None:
+    skelroots = get_people_skelroots()
+    if not skelroots:
+        print("[spot_bridge_with_people] No character SkelRoots found for Isaac 6 BehaviorAgentAPI setup.")
+        return
+
+    motion_library_path = ensure_behavior_motion_library()
+    if motion_library_path is None:
+        print("[spot_bridge_with_people] Behavior motion library unavailable; LookAt may report missing agents.")
+        return
+
+    try:
+        import BehaviorSchema
+
+        missing = [prim for prim in skelroots if not prim.HasAPI(BehaviorSchema.BehaviorAgentAPI)]
+    except Exception:
+        missing = skelroots
+
+    if not missing:
+        print(f"[spot_bridge_with_people] Isaac 6 BehaviorAgentAPI already present on {len(skelroots)} characters.")
+        return
+
+    try:
+        omni.kit.commands.execute(
+            "ApplyBehaviorAgentAPICommand",
+            skelroot_prim_paths=[prim.GetPath() for prim in missing],
+            motion_library_prim_path=motion_library_path,
+            motion_library_skeleton_rig="Human",
+        )
+    except Exception as exc:
+        print(f"[spot_bridge_with_people] Failed to apply Isaac 6 BehaviorAgentAPI: {exc}")
+        return
+
+    for _ in range(10):
+        simulation_app.update()
+
+    print(
+        "[spot_bridge_with_people] Applied Isaac 6 BehaviorAgentAPI: "
+        f"{len(missing)}/{len(skelroots)} characters"
+    )
+
+
+def init_behavior_scripts() -> None:
     script_manager = ScriptManager.get_instance()
     if script_manager is None or script_manager._stage is None:
         print("[spot_bridge_with_people] ScriptManager is not ready for people behavior init.")
         return
 
-    agent_manager = AgentManager.get_instance()
+    agent_manager = get_legacy_agent_manager()
+    if agent_manager is None:
+        print("[spot_bridge_with_people] Legacy Replicator AgentManager is not available; skipping script command registration.")
+        return
+
     skelroot_paths = sorted(get_people_skelroot_paths())
     if not skelroot_paths:
         print("[spot_bridge_with_people] No people SkelRoots found for behavior init.")
@@ -418,9 +627,86 @@ def combo_box_index(model) -> int:
 
 
 def get_agent(name: str):
-    from isaacsim.replicator.agent.core.agent_manager import AgentManager
+    agent_manager = get_legacy_agent_manager()
+    if agent_manager is None:
+        return None
 
-    return AgentManager.get_instance().get_agent_script_instance_by_name(name)
+    return agent_manager.get_agent_script_instance_by_name(name)
+
+
+def get_legacy_agent_manager():
+    try:
+        from isaacsim.replicator.agent.core.agent_manager import AgentManager
+    except ModuleNotFoundError:
+        return None
+    return AgentManager.get_instance()
+
+
+def random_look_at_target(agent, radius: float, height: float) -> tuple[float, float, float] | None:
+    try:
+        pos = agent.get_world_translation()
+    except Exception:
+        return None
+
+    angle = random.uniform(0.0, math.tau)
+    distance = random.uniform(max(0.5, radius * 0.45), max(0.5, radius))
+    z_offset = random.uniform(-0.25, 0.35)
+    return (
+        float(pos[0]) + math.cos(angle) * distance,
+        float(pos[1]) + math.sin(angle) * distance,
+        float(pos[2]) + height + z_offset,
+    )
+
+
+def look_at_all_characters(duration: float = LOOK_AT_DEFAULT_DURATION, radius: float = LOOK_AT_DEFAULT_RADIUS) -> None:
+    import omni.anim.behavior.core as bh_core
+
+    behavior = bh_core.acquire_interface()
+    skelroots = sorted(get_people_skelroots(), key=lambda prim: str(prim.GetPath()))
+    if not skelroots:
+        print("[people_control_test] No character SkelRoots found for LookAt.")
+        return
+
+    invalid_task_id = getattr(bh_core, "BEHAVIOR_TASK_ID_INVALID", -1)
+    started = 0
+    missing_agents = []
+    failed = []
+
+    for skelroot in skelroots:
+        path = str(skelroot.GetPath())
+        agent = behavior.get_agent(path)
+        if agent is None:
+            missing_agents.append(path)
+            continue
+
+        target = random_look_at_target(agent, radius, LOOK_AT_DEFAULT_HEIGHT)
+        if target is None:
+            failed.append(path)
+            continue
+
+        try:
+            task_id = agent.look_at(target=target, duration=duration)
+        except Exception as exc:
+            print(f"[people_control_test] LookAt failed for {path}: {exc}")
+            failed.append(path)
+            continue
+
+        if task_id == invalid_task_id:
+            failed.append(path)
+            continue
+        started += 1
+
+    print(
+        "[people_control_test] LookAt all characters: "
+        f"started={started}, missing_agents={len(missing_agents)}, failed={len(failed)}, total={len(skelroots)}"
+    )
+    if missing_agents:
+        print(f"[people_control_test] First LookAt missing behavior agent: {missing_agents[0]}")
+    if failed:
+        print(f"[people_control_test] First LookAt failed character: {failed[0]}")
+
+    if STATUS_LABEL:
+        STATUS_LABEL.text = f"LookAt all: {started}/{len(skelroots)}"
 
 
 def agent_command_done(agent) -> bool:
@@ -822,6 +1108,12 @@ def run_button(button: dict, selected_character: dict, x_model, y_model, r_model
 
     if action == "reset":
         SCENARIO_RUNNER.stop_all()
+    elif action == "look_at_all":
+        SCENARIO_RUNNER.stop_all()
+        duration = float(button.get("duration", LOOK_AT_DEFAULT_DURATION))
+        radius = float(button.get("radius", LOOK_AT_DEFAULT_RADIUS))
+        look_at_all_characters(duration=duration, radius=radius)
+        return
     elif action == "stop":
         SCENARIO_RUNNER.stop_all()
         return
@@ -899,7 +1191,6 @@ def remove_stale_people_scripts() -> None:
     """Remove behavior scripts authored on non-SkelRoot character descendants."""
     import OmniScriptingSchema
     import omni.kit.commands
-    from pxr import UsdSkel
 
     stage = omni.usd.get_context().get_stage()
     root = stage.GetPrimAtPath(CHARACTER_ROOT)
@@ -952,15 +1243,16 @@ def force_load_skelroot_people_scripts() -> None:
 
 
 def log_people_registration() -> None:
-    from isaacsim.replicator.agent.core.agent_manager import AgentManager
-    from isaacsim.replicator.agent.core.stage_util import CharacterUtil
-
-    skelroots = [str(prim.GetPath()) for prim in CharacterUtil.get_characters_in_stage()]
+    skelroots = [str(prim.GetPath()) for prim in get_people_skelroots()]
     print(f"[spot_bridge_with_people] Character SkelRoots: {len(skelroots)}")
     if skelroots:
         print(f"[spot_bridge_with_people] First Character SkelRoot: {skelroots[0]}")
 
-    agent_manager = AgentManager.get_instance()
+    agent_manager = get_legacy_agent_manager()
+    if agent_manager is None:
+        print("[spot_bridge_with_people] Legacy registered people agents: unavailable in this Isaac version")
+        return
+
     registered = list(agent_manager.get_all_agent_names())
     print(f"[spot_bridge_with_people] Registered people agents: {len(registered)}")
     if registered:
@@ -976,6 +1268,7 @@ def setup_people_controls(open_stage_file: bool = False) -> ui.Window:
     remove_stale_people_scripts()
     bake_navmesh()
     setup_saved_characters()
+    ensure_behavior_agents()
     remove_stale_people_scripts()
     force_load_skelroot_people_scripts()
     init_behavior_scripts()
@@ -1028,6 +1321,10 @@ def _quat_mul(q1, q2):
     )
 
 
+def spot_policy_command(command):
+    return torch.as_tensor(command, dtype=torch.float32, device=torch.device(str(spot.robot._device)))
+
+
 # initialize robot on first step, run robot advance
 def on_physics_step(step_size) -> None:
     global first_step
@@ -1042,10 +1339,10 @@ def on_physics_step(step_size) -> None:
     else:
         if np.all(np.abs(base_command) < CMD_DEADBAND):
             # Hold a gentle idle command instead of pure zero to keep the policy stable
-            spot.forward(step_size, CMD_IDLE)
+            spot.forward(step_size, spot_policy_command(CMD_IDLE))
         else:
             # Scale cmd_vel to the range the RL policy was trained on
-            spot.forward(step_size, base_command * CMD_SCALE)
+            spot.forward(step_size, spot_policy_command(base_command * CMD_SCALE))
 
 
 # spawn world
@@ -1062,7 +1359,6 @@ print(f"[spot_bridge_with_people] Using people-loaded stage: {USD_PATH}")
 # spawn robot
 spot = SpotFlatTerrainPolicy(
     prim_path="/World/spot",
-    name="Spot",
     position=np.array([0, 0, 0.8]),
 )
 

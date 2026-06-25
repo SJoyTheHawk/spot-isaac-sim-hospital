@@ -27,6 +27,7 @@ import omni.graph.core as og
 import omni.kit.commands
 import omni.usd
 from isaacsim.core.api import World
+from isaacsim.core.deprecation_manager import import_module
 from isaacsim.core.utils.extensions import enable_extension
 from isaacsim.core.utils.prims import define_prim
 from isaacsim.robot.policy.examples.robots import SpotFlatTerrainPolicy
@@ -44,6 +45,7 @@ from sensor_msgs.msg import JointState
 
 first_step = True
 reset_needed = False
+torch = import_module("torch")
 
 # Scale factors mapping real-world cmd_vel (m/s, m/s, rad/s) to the policy's
 # internal command space. SpotFlatTerrainPolicy was trained with vx/vy in
@@ -190,6 +192,10 @@ def _quat_mul(q1, q2):
     )
 
 
+def spot_policy_command(command):
+    return torch.as_tensor(command, dtype=torch.float32, device=torch.device(str(spot.robot._device)))
+
+
 # initialize robot on first step, run robot advance
 def on_physics_step(step_size) -> None:
     global first_step
@@ -204,10 +210,10 @@ def on_physics_step(step_size) -> None:
     else:
         if np.all(np.abs(base_command) < CMD_DEADBAND):
             # Hold a gentle idle command instead of pure zero to keep the policy stable
-            spot.forward(step_size, CMD_IDLE)
+            spot.forward(step_size, spot_policy_command(CMD_IDLE))
         else:
             # Scale cmd_vel to the range the RL policy was trained on
-            spot.forward(step_size, base_command * CMD_SCALE)
+            spot.forward(step_size, spot_policy_command(base_command * CMD_SCALE))
 
 
 # spawn world
@@ -235,7 +241,6 @@ prim.GetReferences().AddReference(asset_path)
 # spawn robot
 spot = SpotFlatTerrainPolicy(
     prim_path="/World/spot",
-    name="Spot",
     position=np.array([0, 0, 0.8]),
 )
 

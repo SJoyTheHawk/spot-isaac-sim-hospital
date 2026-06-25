@@ -1,10 +1,23 @@
 """Standalone people-control test for Isaac Sim."""
 
+import os
+
 from isaacsim import SimulationApp
 
-simulation_app = SimulationApp({"headless": False})
 
-import os
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None or value.strip() == "":
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+PEOPLE_TEST_HEADLESS = _env_flag("PEOPLE_TEST_HEADLESS", _env_flag("SPOT_ISAAC_HEADLESS", False))
+
+simulation_app = SimulationApp({"headless": PEOPLE_TEST_HEADLESS})
+
+import math
+import random
 import time
 from pathlib import Path
 
@@ -14,13 +27,13 @@ import omni.ui as ui
 import omni.usd
 import yaml
 from isaacsim.core.utils.extensions import enable_extension
-from omni.kit.scripting.scripts.script_manager import ScriptManager
-from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics
+from omni.behavior.scripting.core.scripts.script_manager import ScriptManager
+from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics, UsdSkel
 
 
 REPO_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 USD_PATH = os.path.realpath(
-    os.environ.get("PEOPLE_TEST_USD", os.path.join(REPO_DIR, "assets", "isaac_hospital_scene_spot_w_characters.usd"))
+    os.environ.get("PEOPLE_TEST_USD", os.path.join(REPO_DIR, "assets", "isaac_hospital_scene_spot_w_characters_6.usd"))
 )
 COMMANDS_YAML_FILE = os.path.realpath(
     os.environ.get("PEOPLE_INITIAL_COMMANDS", os.path.join(REPO_DIR, "assets", "people_initial_commands.yaml"))
@@ -32,7 +45,13 @@ PEOPLE_COMMAND_FILE_IS_DEFAULT = PEOPLE_COMMAND_FILE == os.path.realpath(
     os.path.join("/tmp", "spot_isaac_people_runtime_commands.txt")
 )
 CHARACTER_ROOT = "/World/Characters"
+MOTION_LIBRARY_PRIM_PATH = f"{CHARACTER_ROOT}/HumanMotionLibrary"
 SEAT_PROXY_ROOT = "/World/PeopleTestSeatTargets"
+LOOK_AT_DEFAULT_DURATION = 8.0
+LOOK_AT_DEFAULT_RADIUS = 4.0
+LOOK_AT_DEFAULT_HEIGHT = 1.45
+PEOPLE_TEST_AUTO_LOOK_AT = _env_flag("PEOPLE_TEST_AUTO_LOOK_AT")
+PEOPLE_TEST_EXIT_AFTER_AUTO = _env_flag("PEOPLE_TEST_EXIT_AFTER_AUTO")
 STATUS_LABEL = None
 LAST_STATUS_LOG_TIME = 0.0
 SCENARIO_RUNNER = None
@@ -50,26 +69,31 @@ SCENARIO_RUNNER = None
 
 
 def enable_people_extensions() -> None:
+    print(f"[people_control_test] Isaac launch: headless={PEOPLE_TEST_HEADLESS}", flush=True)
     for ext in [
-        "omni.kit.scripting",
+        "omni.behavior.scripting.core",
+        "omni.anim.behavior.core",
         "omni.anim.timeline",
         "omni.anim.graph.core",
         "omni.anim.retarget.core",
         "omni.anim.navigation.core",
-        "omni.anim.people",
         "isaacsim.replicator.agent.core",
         "omni.kit.mesh.raycast",
     ]:
+        print(f"[people_control_test] Enabling extension: {ext}", flush=True)
         enable_extension(ext)
+        print(f"[people_control_test] Extension enabled: {ext}", flush=True)
     simulation_app.update()
+    print("[people_control_test] People extensions ready.", flush=True)
 
 
 def open_stage() -> None:
-    print(f"[people_control_test] Loading: {USD_PATH}")
+    print(f"[people_control_test] Loading: {USD_PATH}", flush=True)
     if not omni.usd.get_context().open_stage(USD_PATH):
         raise RuntimeError(USD_PATH)
     for _ in range(8):
         simulation_app.update()
+    print("[people_control_test] Stage loaded.", flush=True)
 
 
 def strip_nested_rigid_bodies() -> None:
@@ -94,12 +118,7 @@ def ensure_people_command_file() -> None:
 def configure_people() -> None:
     ensure_people_command_file()
     settings = carb.settings.get_settings()
-    settings.set("/persistent/exts/omni.anim.people/character_prim_path", CHARACTER_ROOT)
     settings.set("/exts/isaacsim.replicator.agent/characters_parent_prim_path", CHARACTER_ROOT)
-    settings.set("/exts/omni.anim.people/command_settings/command_file_path", PEOPLE_COMMAND_FILE)
-    settings.set("/exts/omni.anim.people/command_settings/number_of_loop", 0)
-    settings.set("/exts/omni.anim.people/navigation_settings/navmesh_enabled", True)
-    settings.set("/exts/omni.anim.people/navigation_settings/dynamic_avoidance_enabled", True)
 
 
 def bake_navmesh() -> None:
@@ -125,27 +144,163 @@ def bake_navmesh() -> None:
 
 def load_people() -> list[str]:
     root = omni.usd.get_context().get_stage().GetPrimAtPath(CHARACTER_ROOT)
+    if not root.IsValid():
+        return []
+
+    skelroots = get_people_skelroots()
+    if skelroots:
+        return sorted(character_display_name(prim) for prim in skelroots)
+
     return [child.GetName() for child in root.GetAllChildren() if child.GetName() != "Biped_Setup"]
 
 
+def get_people_skelroots() -> list:
+    stage = omni.usd.get_context().get_stage()
+    if stage is None:
+        return []
+
+    root = stage.GetPrimAtPath(CHARACTER_ROOT)
+    if not root.IsValid():
+        return []
+
+    skelroots = []
+    for prim in Usd.PrimRange(root):
+        if prim == root:
+            continue
+        prim_path = str(prim.GetPath())
+        if "/Biped_Setup/" in prim_path:
+            continue
+        if prim.IsA(UsdSkel.Root) or prim.GetTypeName() == "SkelRoot":
+            skelroots.append(prim)
+
+    return skelroots
+
+
+def character_display_name(skelroot_prim) -> str:
+    path_parts = [part for part in str(skelroot_prim.GetPath()).split("/") if part]
+    root_parts = [part for part in CHARACTER_ROOT.split("/") if part]
+    if path_parts[: len(root_parts)] == root_parts:
+        relative_parts = path_parts[len(root_parts) :]
+        if len(relative_parts) >= 2 and relative_parts[0].endswith("_Group"):
+            return relative_parts[1]
+        if relative_parts:
+            return relative_parts[0]
+    return skelroot_prim.GetName()
+
+
 def setup_saved_characters() -> None:
-    from isaacsim.replicator.agent.core.settings import BehaviorScriptPaths
-    from isaacsim.replicator.agent.core.stage_util import CharacterUtil
+    try:
+        from isaacsim.replicator.agent.core.settings import BehaviorScriptPaths
+        from isaacsim.replicator.agent.core.stage_util import CharacterUtil
+    except ModuleNotFoundError:
+        print("[people_control_test] Legacy character setup API is not available; using Isaac 6 authored characters.")
+        return
 
     biped_prim = CharacterUtil.load_default_biped_to_stage()
     anim_graph = CharacterUtil.get_anim_graph_from_character(biped_prim)
-    skelroots = [prim for prim in CharacterUtil.get_characters_in_stage() if "/Biped_Setup/" not in str(prim.GetPath())]
+    skelroots = get_people_skelroots()
     CharacterUtil.setup_animation_graph_to_character(skelroots, anim_graph)
     CharacterUtil.setup_python_scripts_to_character(skelroots, BehaviorScriptPaths.behavior_script_path())
     for _ in range(15):
         simulation_app.update()
 
 
-def init_behavior_scripts() -> None:
-    from isaacsim.replicator.agent.core.agent_manager import AgentManager
+def default_human_motion_library_asset() -> str:
+    settings = carb.settings.get_settings()
+    asset = settings.get("/exts/isaacsim.replicator.agent/default_human_motion_library_asset")
+    if asset:
+        return asset
 
+    try:
+        from omni.metropolis.utils.isaac_sim_util import resolve_asset_path
+    except Exception:
+        return "Isaac/People/MotionLibrary/HumanMotionLibrary.usd"
+
+    return resolve_asset_path("Isaac/People/MotionLibrary/HumanMotionLibrary.usd")
+
+
+def ensure_behavior_motion_library() -> Sdf.Path | None:
+    stage = omni.usd.get_context().get_stage()
+    if stage is None:
+        return None
+
+    motion_library_path = Sdf.Path(MOTION_LIBRARY_PRIM_PATH)
+    prim = stage.GetPrimAtPath(motion_library_path)
+    if prim and prim.IsValid():
+        return motion_library_path
+
+    asset = default_human_motion_library_asset()
+    print(f"[people_control_test] Creating Isaac 6 behavior motion library at {MOTION_LIBRARY_PRIM_PATH}")
+    try:
+        omni.kit.commands.execute(
+            "CreatePayloadCommand",
+            usd_context=omni.usd.get_context(),
+            path_to=motion_library_path,
+            asset_path=asset,
+            prim_path=None,
+            instanceable=False,
+            select_prim=False,
+        )
+    except Exception as exc:
+        print(f"[people_control_test] Failed to create behavior motion library from {asset}: {exc}")
+        return None
+
+    for _ in range(5):
+        simulation_app.update()
+
+    prim = stage.GetPrimAtPath(motion_library_path)
+    return motion_library_path if prim and prim.IsValid() else None
+
+
+def ensure_behavior_agents() -> None:
+    skelroots = get_people_skelroots()
+    if not skelroots:
+        print("[people_control_test] No character SkelRoots found for Isaac 6 BehaviorAgentAPI setup.")
+        return
+
+    motion_library_path = ensure_behavior_motion_library()
+    if motion_library_path is None:
+        print("[people_control_test] Behavior motion library unavailable; LookAt may report missing agents.")
+        return
+
+    try:
+        import BehaviorSchema
+
+        missing = [prim for prim in skelroots if not prim.HasAPI(BehaviorSchema.BehaviorAgentAPI)]
+    except Exception:
+        missing = skelroots
+
+    if not missing:
+        print(f"[people_control_test] Isaac 6 BehaviorAgentAPI already present on {len(skelroots)} characters.")
+        return
+
+    try:
+        omni.kit.commands.execute(
+            "ApplyBehaviorAgentAPICommand",
+            skelroot_prim_paths=[prim.GetPath() for prim in missing],
+            motion_library_prim_path=motion_library_path,
+            motion_library_skeleton_rig="Human",
+        )
+    except Exception as exc:
+        print(f"[people_control_test] Failed to apply Isaac 6 BehaviorAgentAPI: {exc}")
+        return
+
+    for _ in range(10):
+        simulation_app.update()
+
+    print(
+        "[people_control_test] Applied Isaac 6 BehaviorAgentAPI: "
+        f"{len(missing)}/{len(skelroots)} characters"
+    )
+
+
+def init_behavior_scripts() -> None:
     script_manager = ScriptManager.get_instance()
-    agent_manager = AgentManager.get_instance()
+    agent_manager = get_legacy_agent_manager()
+    if agent_manager is None:
+        print("[people_control_test] Legacy Replicator AgentManager is not available; skipping script command registration.")
+        return
+
     for _ in range(50):
         simulation_app.update()
     for scripts in script_manager._prim_to_scripts.values():
@@ -206,9 +361,94 @@ def combo_box_index(model) -> int:
 
 
 def get_agent(name: str):
-    from isaacsim.replicator.agent.core.agent_manager import AgentManager
+    agent_manager = get_legacy_agent_manager()
+    if agent_manager is None:
+        return None
 
-    return AgentManager.get_instance().get_agent_script_instance_by_name(name)
+    return agent_manager.get_agent_script_instance_by_name(name)
+
+
+def get_legacy_agent_manager():
+    try:
+        from isaacsim.replicator.agent.core.agent_manager import AgentManager
+    except ModuleNotFoundError:
+        return None
+    return AgentManager.get_instance()
+
+
+def vec3_components(value) -> tuple[float, float, float]:
+    try:
+        return float(value[0]), float(value[1]), float(value[2])
+    except (TypeError, IndexError, KeyError):
+        return float(value.x), float(value.y), float(value.z)
+
+
+def random_look_at_target(agent, radius: float, height: float) -> tuple[float, float, float] | None:
+    try:
+        pos = agent.get_world_translation()
+    except Exception:
+        return None
+
+    x, y, z = vec3_components(pos)
+    angle = random.uniform(0.0, math.tau)
+    distance = random.uniform(max(0.5, radius * 0.45), max(0.5, radius))
+    z_offset = random.uniform(-0.25, 0.35)
+    return (
+        x + math.cos(angle) * distance,
+        y + math.sin(angle) * distance,
+        z + height + z_offset,
+    )
+
+
+def look_at_all_characters(duration: float = LOOK_AT_DEFAULT_DURATION, radius: float = LOOK_AT_DEFAULT_RADIUS) -> None:
+    import omni.anim.behavior.core as bh_core
+
+    behavior = bh_core.acquire_interface()
+    skelroots = sorted(get_people_skelroots(), key=lambda prim: str(prim.GetPath()))
+    if not skelroots:
+        print("[people_control_test] No character SkelRoots found for LookAt.")
+        return
+
+    invalid_task_id = getattr(bh_core, "BEHAVIOR_TASK_ID_INVALID", -1)
+    started = 0
+    missing_agents = []
+    failed = []
+
+    for skelroot in skelroots:
+        path = str(skelroot.GetPath())
+        agent = behavior.get_agent(path)
+        if agent is None:
+            missing_agents.append(path)
+            continue
+
+        target = random_look_at_target(agent, radius, LOOK_AT_DEFAULT_HEIGHT)
+        if target is None:
+            failed.append(path)
+            continue
+
+        try:
+            task_id = agent.look_at(target=target, duration=duration)
+        except Exception as exc:
+            print(f"[people_control_test] LookAt failed for {path}: {exc}")
+            failed.append(path)
+            continue
+
+        if task_id == invalid_task_id:
+            failed.append(path)
+            continue
+        started += 1
+
+    print(
+        "[people_control_test] LookAt all characters: "
+        f"started={started}, missing_agents={len(missing_agents)}, failed={len(failed)}, total={len(skelroots)}"
+    )
+    if missing_agents:
+        print(f"[people_control_test] First LookAt missing behavior agent: {missing_agents[0]}")
+    if failed:
+        print(f"[people_control_test] First LookAt failed character: {failed[0]}")
+
+    if STATUS_LABEL:
+        STATUS_LABEL.text = f"LookAt all: {started}/{len(skelroots)}"
 
 
 def agent_command_done(agent) -> bool:
@@ -610,6 +850,12 @@ def run_button(button: dict, selected_character: dict, x_model, y_model, r_model
 
     if action == "reset":
         SCENARIO_RUNNER.stop_all()
+    elif action == "look_at_all":
+        SCENARIO_RUNNER.stop_all()
+        duration = float(button.get("duration", LOOK_AT_DEFAULT_DURATION))
+        radius = float(button.get("radius", LOOK_AT_DEFAULT_RADIUS))
+        look_at_all_characters(duration=duration, radius=radius)
+        return
     elif action == "stop":
         SCENARIO_RUNNER.stop_all()
         return
@@ -635,6 +881,7 @@ def build_ui() -> ui.Window:
     global STATUS_LABEL
 
     people = sorted(load_people())
+    print(f"[people_control_test] UI character names: {people}", flush=True)
     default_index = people.index("Male_patient_01") if "Male_patient_01" in people else 0
     selected_character = {"character": people[default_index] if people else ""}
     buttons = yaml_buttons()
@@ -689,10 +936,21 @@ strip_nested_rigid_bodies()
 configure_people()
 bake_navmesh()
 setup_saved_characters()
+ensure_behavior_agents()
 init_behavior_scripts()
 control_window = build_ui()
 
 omni.timeline.get_timeline_interface().play()
+if PEOPLE_TEST_AUTO_LOOK_AT:
+    for _ in range(30):
+        simulation_app.update()
+    look_at_all_characters()
+    if PEOPLE_TEST_EXIT_AFTER_AUTO:
+        for _ in range(30):
+            simulation_app.update()
+        simulation_app.close()
+        raise SystemExit(0)
+
 while simulation_app.is_running():
     refresh_status()
     simulation_app.update()

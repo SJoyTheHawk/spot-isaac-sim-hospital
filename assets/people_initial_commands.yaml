@@ -7,7 +7,9 @@ buttons:
     scenario: "selected_goto"
 
   - label: "Look Around"
-    scenario: "look_around"
+    action: "look_at_all"
+    duration: 8
+    radius: 4
 
   - label: "Set patrol"
     scenario: "set_patrol"

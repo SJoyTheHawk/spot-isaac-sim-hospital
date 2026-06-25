@@ -38,7 +38,9 @@ setup out of the box.
 ## Prerequisites
 
 - **Ubuntu 24.04 LTS**
-- **NVIDIA GPU** with a recent driver (RTX series recommended)
+- **NVIDIA GPU** with a recent driver (RTX series recommended). Isaac/RTX
+  startup can be driver-sensitive; this Isaac Sim 5.1.0 install reports
+  NVIDIA `580.95.05` as the tested RTX driver branch.
 - **Isaac Sim 5.1.0** — workstation install recommended
   <https://docs.isaacsim.omniverse.nvidia.com/5.1.0/installation/index.html>
 - **ROS 2 Jazzy**
@@ -113,6 +115,11 @@ The combined bridge is implemented in
 [`isaac_sim/spot_bridge_with_people.py`](isaac_sim/spot_bridge_with_people.py).
 It is intentionally self-contained and does not import the standalone Spot or
 people scripts at runtime.
+
+The launcher uses conservative Isaac startup defaults for the combined scene:
+`SPOT_ISAAC_ANTI_ALIASING=1`, `SPOT_ISAAC_MULTI_GPU=0`, and
+`SPOT_ISAAC_CREATE_NEW_STAGE=0`. Override them in `env/spot_isaac.env` only if
+your workstation needs different renderer behavior.
 
 People scenario captures:
 
@@ -465,6 +472,15 @@ increasing `physics_dt` from `1/500` toward `1/200`.
 
 **Low FPS or sluggish simulation** — extra camera render products are expensive.
 Set `ENABLE_FISHEYE_CAMERAS = False` and `ENABLE_REALSENSE = False` first if the simulation feels slow, especially on lower-end GPUs or when running people, Nav2, RViz, and multiple camera streams together.
+
+**Segmentation fault before `[people_control_test] Loading:`** — Isaac is
+crashing during native RTX startup before the repository script opens the USD or
+builds the ROS graphs. Keep the combined bridge defaults
+(`SPOT_ISAAC_ANTI_ALIASING=1`, `SPOT_ISAAC_MULTI_GPU=0`,
+`SPOT_ISAAC_CREATE_NEW_STAGE=0`) and try
+`SPOT_ISAAC_HEADLESS=1 ./scripts/run_spot_bridge_with_people.sh` to isolate the
+viewport path. If it still crashes, verify Isaac opens from the App Selector and
+try the tested NVIDIA `580.95.05` driver branch.
 
 **`IsaacComputeOdometry` shape error** — extra `RigidBodyAPI`s are nested
 under `/World/spot/body/`. The script strips these automatically; if you see

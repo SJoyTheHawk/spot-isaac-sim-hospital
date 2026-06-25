@@ -35,9 +35,22 @@ export PATH=$(_strip_ros "${PATH:-}")
 export LD_LIBRARY_PATH=$(_strip_ros "${LD_LIBRARY_PATH:-}")
 export PYTHONPATH=$(_strip_ros "${PYTHONPATH:-}")
 
+_append_env_path() {
+    local var_name="$1"
+    local path="$2"
+    [[ -d "$path" ]] || return 0
+    if [[ -n "${!var_name:-}" ]]; then
+        export "$var_name=${!var_name}:$path"
+    else
+        export "$var_name=$path"
+    fi
+}
+
 # ── 5. Re-export Isaac Sim / ROS bridge variables ──────────────────────────
 export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
-export LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:${ISAAC_SIM_PATH}/exts/isaacsim.ros2.bridge/${ROS_DISTRO}/lib"
+ROS_CORE_ROOT="${ISAAC_SIM_PATH}/exts/isaacsim.ros2.core/${ROS_DISTRO}"
+_append_env_path LD_LIBRARY_PATH "${ROS_CORE_ROOT}/lib"
+_append_env_path PYTHONPATH "${ROS_CORE_ROOT}/rclpy"
 
 # ── 6. Run the standalone script ───────────────────────────────────────────
 SCRIPT="${1:-$REPO_DIR/isaac_sim/spot_standalone.py}"

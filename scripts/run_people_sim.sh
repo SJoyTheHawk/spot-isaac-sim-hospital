@@ -11,7 +11,7 @@ if [[ -f "$ENV_FILE" ]]; then
 fi
 
 : "${ISAAC_SIM_PATH:=$HOME/isaac-sim}"
-: "${PEOPLE_TEST_USD:=$REPO_DIR/assets/isaac_hospital_scene_spot_w_characters.usd}"
+: "${PEOPLE_TEST_USD:=$REPO_DIR/assets/isaac_hospital_scene_spot_w_characters_6.usd}"
 : "${PEOPLE_COMMAND_FILE:=/tmp/spot_isaac_people_runtime_commands.txt}"
 
 export PEOPLE_TEST_USD PEOPLE_COMMAND_FILE

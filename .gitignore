@@ -6,6 +6,8 @@ __pycache__/
 .vscode/
 *.egg-info/
 backup/
+.agents
+.codex
 
 # Local machine-specific config — must be copied from env/spot_isaac.env.template
 env/spot_isaac.env

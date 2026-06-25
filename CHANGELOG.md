@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Added environment overrides for combined Spot + people Isaac startup settings.
+- Added troubleshooting guidance for native RTX startup crashes before the people USD is loaded.
+
+### Fixed
+
+- Hardened the combined Spot + people launcher by using TAA antialiasing, disabling multi-GPU, and skipping Isaac's default empty stage creation before opening the character hospital USD.
+
 ## 2.0.1 - 2026-05-10
 
 ### Added
