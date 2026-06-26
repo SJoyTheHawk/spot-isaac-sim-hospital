@@ -4,7 +4,7 @@ buttons:
     scenario: "initialize"
 
   - label: "GoTo"
-    scenario: "selected_goto"
+    action: "go_to_selected"
 
   - label: "Look Around"
     action: "look_at_all"
@@ -257,18 +257,3 @@ scenarios:
   #         - type: command
   #           command: "Male_patient_01 Fall 10"
   #
-  # nurse_front_desk_loop:
-  #   label: "Front Desk Loop"
-  #   characters:
-  #     Female_nurse_01:
-  #       type: repeat
-  #       count: inf
-  #       steps:
-  #         - type: command
-  #           command: "Female_nurse_01 Stand 10"
-  #         - type: wait
-  #           seconds: 10
-  #         - type: command
-  #           command: "Female_nurse_01 Sit /World/PeopleTestSeatTargets/SM_Chair_01a1 10"
-  #         - type: wait
-  #           seconds: 10

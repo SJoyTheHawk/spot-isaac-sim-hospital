@@ -12,6 +12,16 @@ def _env_flag(name: str, default: bool = False) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _env_optional_float(name: str) -> float | None:
+    value = os.environ.get(name)
+    if value is None or value.strip() == "":
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
+
 PEOPLE_TEST_HEADLESS = _env_flag("PEOPLE_TEST_HEADLESS", _env_flag("SPOT_ISAAC_HEADLESS", False))
 
 simulation_app = SimulationApp({"headless": PEOPLE_TEST_HEADLESS})
@@ -19,7 +29,6 @@ simulation_app = SimulationApp({"headless": PEOPLE_TEST_HEADLESS})
 import math
 import random
 import time
-from pathlib import Path
 
 import carb
 import omni.timeline
@@ -27,7 +36,6 @@ import omni.ui as ui
 import omni.usd
 import yaml
 from isaacsim.core.utils.extensions import enable_extension
-from omni.behavior.scripting.core.scripts.script_manager import ScriptManager
 from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics, UsdSkel
 
 
@@ -38,34 +46,26 @@ USD_PATH = os.path.realpath(
 COMMANDS_YAML_FILE = os.path.realpath(
     os.environ.get("PEOPLE_INITIAL_COMMANDS", os.path.join(REPO_DIR, "assets", "people_initial_commands.yaml"))
 )
-PEOPLE_COMMAND_FILE = os.path.realpath(
-    os.environ.get("PEOPLE_COMMAND_FILE", os.path.join("/tmp", "spot_isaac_people_runtime_commands.txt"))
-)
-PEOPLE_COMMAND_FILE_IS_DEFAULT = PEOPLE_COMMAND_FILE == os.path.realpath(
-    os.path.join("/tmp", "spot_isaac_people_runtime_commands.txt")
-)
 CHARACTER_ROOT = "/World/Characters"
 MOTION_LIBRARY_PRIM_PATH = f"{CHARACTER_ROOT}/HumanMotionLibrary"
-SEAT_PROXY_ROOT = "/World/PeopleTestSeatTargets"
 LOOK_AT_DEFAULT_DURATION = 8.0
 LOOK_AT_DEFAULT_RADIUS = 4.0
 LOOK_AT_DEFAULT_HEIGHT = 1.45
+SIT_SNAP_TO_SEAT = _env_flag("PEOPLE_SIT_SNAP_TO_SEAT", True)
+SIT_HIPS_OFFSET_X = _env_optional_float("PEOPLE_SIT_HIPS_OFFSET_X")
+SIT_HIPS_OFFSET_Y = _env_optional_float("PEOPLE_SIT_HIPS_OFFSET_Y")
+SIT_HIPS_OFFSET_Z = _env_optional_float("PEOPLE_SIT_HIPS_OFFSET_Z")
+SIT_HIPS_ROTATE_X = _env_optional_float("PEOPLE_SIT_HIPS_ROTATE_X")
+SIT_HIPS_ROTATE_Y = _env_optional_float("PEOPLE_SIT_HIPS_ROTATE_Y")
+SIT_HIPS_ROTATE_Z = _env_optional_float("PEOPLE_SIT_HIPS_ROTATE_Z")
 PEOPLE_TEST_AUTO_LOOK_AT = _env_flag("PEOPLE_TEST_AUTO_LOOK_AT")
+PEOPLE_TEST_AUTO_GOTO = _env_flag("PEOPLE_TEST_AUTO_GOTO")
+PEOPLE_TEST_AUTO_PATROL = _env_flag("PEOPLE_TEST_AUTO_PATROL")
+PEOPLE_TEST_AUTO_SIT = _env_flag("PEOPLE_TEST_AUTO_SIT")
 PEOPLE_TEST_EXIT_AFTER_AUTO = _env_flag("PEOPLE_TEST_EXIT_AFTER_AUTO")
 STATUS_LABEL = None
 LAST_STATUS_LOG_TIME = 0.0
 SCENARIO_RUNNER = None
-
-# STARTUP_SEATED_PEOPLE = {
-#     "Female_visitor_02": "/World/hospital/SM_Chair_02a7",
-#     "Male_visitor_02": "/World/hospital/SM_Chair_02a5",
-#     "Male_visitor_01": "/World/hospital/SM_Chair_02a4",
-#     "Male_patient_04": "/World/hospital/SM_WheelChair_01a4",
-#     "Female_patient_05": "/World/hospital/SM_Chair_01a7",
-#     "Male_patient_05": "/World/hospital/SM_Chair_01a12",
-#     "Female_nurse_02": "/World/hospital/SM_Chair_01a13",
-#     "Male_patient_01": "/World/hospital/SM_Chair_01a3",
-# }
 
 
 def enable_people_extensions() -> None:
@@ -106,17 +106,7 @@ def strip_nested_rigid_bodies() -> None:
                 prim.GetAttribute("physics:rigidBodyEnabled").Set(False)
 
 
-def ensure_people_command_file() -> None:
-    if not PEOPLE_COMMAND_FILE or "://" in PEOPLE_COMMAND_FILE:
-        return
-    os.makedirs(os.path.dirname(PEOPLE_COMMAND_FILE), exist_ok=True)
-    mode = "w" if PEOPLE_COMMAND_FILE_IS_DEFAULT else "a"
-    with open(PEOPLE_COMMAND_FILE, mode, encoding="utf-8"):
-        pass
-
-
 def configure_people() -> None:
-    ensure_people_command_file()
     settings = carb.settings.get_settings()
     settings.set("/exts/isaacsim.replicator.agent/characters_parent_prim_path", CHARACTER_ROOT)
 
@@ -188,21 +178,11 @@ def character_display_name(skelroot_prim) -> str:
     return skelroot_prim.GetName()
 
 
-def setup_saved_characters() -> None:
-    try:
-        from isaacsim.replicator.agent.core.settings import BehaviorScriptPaths
-        from isaacsim.replicator.agent.core.stage_util import CharacterUtil
-    except ModuleNotFoundError:
-        print("[people_control_test] Legacy character setup API is not available; using Isaac 6 authored characters.")
-        return
-
-    biped_prim = CharacterUtil.load_default_biped_to_stage()
-    anim_graph = CharacterUtil.get_anim_graph_from_character(biped_prim)
-    skelroots = get_people_skelroots()
-    CharacterUtil.setup_animation_graph_to_character(skelroots, anim_graph)
-    CharacterUtil.setup_python_scripts_to_character(skelroots, BehaviorScriptPaths.behavior_script_path())
-    for _ in range(15):
-        simulation_app.update()
+def get_character_skelroot(character_name: str):
+    for skelroot in get_people_skelroots():
+        if character_display_name(skelroot) == character_name:
+            return skelroot
+    return None
 
 
 def default_human_motion_library_asset() -> str:
@@ -294,23 +274,6 @@ def ensure_behavior_agents() -> None:
     )
 
 
-def init_behavior_scripts() -> None:
-    script_manager = ScriptManager.get_instance()
-    agent_manager = get_legacy_agent_manager()
-    if agent_manager is None:
-        print("[people_control_test] Legacy Replicator AgentManager is not available; skipping script command registration.")
-        return
-
-    for _ in range(50):
-        simulation_app.update()
-    for scripts in script_manager._prim_to_scripts.values():
-        for _, inst in scripts.items():
-            if inst and hasattr(inst, "init_character"):
-                inst.on_play()
-                if inst.init_character():
-                    agent_manager.register_agent(inst.get_agent_name(), inst.prim_path)
-
-
 def load_yaml_config() -> dict:
     with open(COMMANDS_YAML_FILE, "r", encoding="utf-8") as f:
         return yaml.safe_load(f) or {}
@@ -323,6 +286,8 @@ def normalize_command_line(line: str) -> str:
     command = parts[1].upper()
     if command == "IDLE":
         parts[1] = "Idle"
+    elif command == "SIT":
+        parts[1] = "Sit"
     elif command in {"LOOKAROUND", "LOOK_AROUND"}:
         parts[1] = "LookAround"
     elif command == "GOTO":
@@ -360,20 +325,57 @@ def combo_box_index(model) -> int:
     return value_model.as_int if hasattr(value_model, "as_int") else -1
 
 
-def get_agent(name: str):
-    agent_manager = get_legacy_agent_manager()
-    if agent_manager is None:
+def parse_goto_command(line: str) -> dict | None:
+    parts = normalize_command_line(line).split()
+    if len(parts) < 5 or len(parts) > 6 or parts[1] != "GoTo":
         return None
 
-    return agent_manager.get_agent_script_instance_by_name(name)
-
-
-def get_legacy_agent_manager():
     try:
-        from isaacsim.replicator.agent.core.agent_manager import AgentManager
-    except ModuleNotFoundError:
+        return {
+            "character": parts[0],
+            "x": float(parts[2]),
+            "y": float(parts[3]),
+            "z": float(parts[4]),
+            "yaw": 0.0 if len(parts) < 6 or parts[5] == "_" else float(parts[5]),
+        }
+    except ValueError as exc:
+        print(f"[people_control_test] Invalid GoTo command '{line}': {exc}")
         return None
-    return AgentManager.get_instance()
+
+
+def parse_sit_command(line: str) -> dict | None:
+    parts = normalize_command_line(line).split()
+    if len(parts) < 3 or len(parts) > 4 or parts[1] != "Sit":
+        return None
+
+    try:
+        duration = float(parts[3]) if len(parts) > 3 else -1.0
+    except ValueError as exc:
+        print(f"[people_control_test] Invalid Sit command '{line}': {exc}")
+        return None
+
+    return {
+        "character": parts[0],
+        "target": parts[2],
+        "duration": duration,
+    }
+
+
+def parse_idle_command(line: str) -> dict | None:
+    parts = normalize_command_line(line).split()
+    if len(parts) < 2 or len(parts) > 3 or parts[1] != "Idle":
+        return None
+
+    try:
+        duration = float(parts[2]) if len(parts) > 2 else -1.0
+    except ValueError as exc:
+        print(f"[people_control_test] Invalid Idle command '{line}': {exc}")
+        return None
+
+    return {
+        "character": parts[0],
+        "duration": duration,
+    }
 
 
 def vec3_components(value) -> tuple[float, float, float]:
@@ -381,6 +383,270 @@ def vec3_components(value) -> tuple[float, float, float]:
         return float(value[0]), float(value[1]), float(value[2])
     except (TypeError, IndexError, KeyError):
         return float(value.x), float(value.y), float(value.z)
+
+
+def navmesh_target_for_xy(agent, x: float, y: float, z: float = 0.0) -> carb.Float3:
+    target = carb.Float3(float(x), float(y), float(z))
+    try:
+        import omni.anim.navigation.core as nav
+
+        navmesh = nav.acquire_interface().get_navmesh()
+        if navmesh is None:
+            return target
+
+        radius = float(agent.get_radius())
+        height = float(agent.get_height())
+        if radius > 0.0 and height > 0.0:
+            agent_desc = nav.NavAgentDesc(radius=radius, height=height, collision_gap=0.0)
+            result = navmesh.query_closest_point(target, agent=agent_desc)
+        else:
+            result = navmesh.query_closest_point(target)
+
+        closest = result[0] if result else None
+        if closest is None:
+            return target
+
+        cx, cy, cz = vec3_components(closest)
+        return carb.Float3(cx, cy, cz)
+    except Exception as exc:
+        print(f"[people_control_test] Navmesh target snap failed; using raw target ({x:g}, {y:g}, {z:g}): {exc}")
+        return target
+
+
+def get_behavior_agent(character_name: str):
+    import omni.anim.behavior.core as bh_core
+
+    character_name = str(character_name or "").strip()
+    if not character_name:
+        return None, None
+
+    skelroot = get_character_skelroot(character_name)
+    if skelroot is None:
+        return None, None
+
+    path = str(skelroot.GetPath())
+    agent = bh_core.acquire_interface().get_agent(path)
+    return agent, path
+
+
+def behavior_task_id_invalid() -> int:
+    import omni.anim.behavior.core as bh_core
+
+    return getattr(bh_core, "BEHAVIOR_TASK_ID_INVALID", -1)
+
+
+def ensure_behavior_prop_api(prim) -> None:
+    try:
+        import BehaviorSchema
+
+        if prim and prim.IsValid() and not prim.HasAPI(BehaviorSchema.BehaviorPropAPI):
+            BehaviorSchema.BehaviorPropAPI.Apply(prim)
+    except Exception as exc:
+        print(f"[people_control_test] Unable to apply BehaviorPropAPI to {prim.GetPath()}: {exc}")
+
+
+def sit_hips_default_transform(stage, target_path: str) -> tuple[Gf.Vec3d, Gf.Vec3d]:
+    offset = Gf.Vec3d(0.0, 0.0, 0.0)
+    rotation = Gf.Vec3d(0.0, 0.0, 0.0)
+
+    if stage is not None and UsdGeom.GetStageUpAxis(stage) == UsdGeom.Tokens.z:
+        rotation = Gf.Vec3d(90.0, 0.0, 0.0)
+
+    if target_path.startswith("/World/Chair/"):
+        # These proxy prims are already authored at seat/hips height. Their
+        # walk_to_offset child is the floor approach point, not the seated pose.
+        offset = Gf.Vec3d(0.0, 0.0, 0.0)
+
+    return offset, rotation
+
+
+def apply_sit_hips_overrides(offset: Gf.Vec3d, rotation: Gf.Vec3d) -> tuple[Gf.Vec3d, Gf.Vec3d]:
+    return (
+        Gf.Vec3d(
+            offset[0] if SIT_HIPS_OFFSET_X is None else SIT_HIPS_OFFSET_X,
+            offset[1] if SIT_HIPS_OFFSET_Y is None else SIT_HIPS_OFFSET_Y,
+            offset[2] if SIT_HIPS_OFFSET_Z is None else SIT_HIPS_OFFSET_Z,
+        ),
+        Gf.Vec3d(
+            rotation[0] if SIT_HIPS_ROTATE_X is None else SIT_HIPS_ROTATE_X,
+            rotation[1] if SIT_HIPS_ROTATE_Y is None else SIT_HIPS_ROTATE_Y,
+            rotation[2] if SIT_HIPS_ROTATE_Z is None else SIT_HIPS_ROTATE_Z,
+        ),
+    )
+
+
+def ensure_sit_effector(target_path: str) -> str:
+    stage = omni.usd.get_context().get_stage()
+    if stage is None:
+        return target_path
+
+    target_path = str(target_path or "").strip()
+    target_prim = stage.GetPrimAtPath(target_path)
+    if not target_prim or not target_prim.IsValid():
+        print(f"[people_control_test] Sit target prim does not exist: {target_path}")
+        return target_path
+
+    ensure_behavior_prop_api(target_prim)
+
+    try:
+        import BehaviorSchema
+    except Exception as exc:
+        print(f"[people_control_test] BehaviorSchema unavailable for sit effector setup: {exc}")
+        return target_path
+
+    behavior_path = Sdf.Path(f"{target_path}/Behavior")
+    sit_path = behavior_path.AppendChild("Sit")
+    hips_path = behavior_path.AppendChild("Sit_Hips")
+
+    if not stage.GetPrimAtPath(behavior_path).IsValid():
+        stage.DefinePrim(behavior_path, "Scope")
+
+    sit_prim = stage.GetPrimAtPath(sit_path)
+    if not sit_prim.IsValid():
+        sit_prim = stage.DefinePrim(sit_path, "BehaviorTaskEffectors")
+    if not sit_prim.HasAPI(BehaviorSchema.BehaviorTaskEffectorAPI):
+        BehaviorSchema.BehaviorTaskEffectorAPI.Apply(sit_prim)
+
+    sit_prim.CreateAttribute("behavior:task", Sdf.ValueTypeNames.Token).Set("Sit")
+    sit_prim.CreateRelationship("behavior:task:effectorHips").SetTargets([hips_path])
+    target_prim.CreateRelationship("behavior:task:effectors").AddTarget(sit_path)
+
+    hips_prim = stage.GetPrimAtPath(hips_path)
+    if not hips_prim.IsValid():
+        hips_prim = stage.DefinePrim(hips_path, "Xform")
+    hips_xform = UsdGeom.Xformable(hips_prim)
+    offset, rotation = apply_sit_hips_overrides(*sit_hips_default_transform(stage, target_path))
+    hips_xform.ClearXformOpOrder()
+    hips_xform.AddTranslateOp().Set(offset)
+    hips_xform.AddRotateXYZOp().Set(rotation)
+    hips_xform.AddScaleOp().Set(Gf.Vec3f(1.0, 1.0, 1.0))
+    print(
+        "[people_control_test] Sit_Hips configured: "
+        f"target={target_path}, offset=({offset[0]:.3f}, {offset[1]:.3f}, {offset[2]:.3f}), "
+        f"rotateXYZ=({rotation[0]:.1f}, {rotation[1]:.1f}, {rotation[2]:.1f})"
+    )
+
+    return target_path
+
+
+def start_behavior_goto(
+    character_name: str,
+    x: float,
+    y: float,
+    z: float = 0.0,
+    yaw_degrees: float = 0.0,
+    log_prefix: str = "GoTo",
+) -> tuple[object | None, int | None]:
+    character_name = str(character_name or "").strip()
+    if not character_name:
+        print(f"[people_control_test] {log_prefix} requested without a character.")
+        return None, None
+
+    agent, path = get_behavior_agent(character_name)
+    if path is None:
+        print(f"[people_control_test] {log_prefix} character not found: {character_name}")
+        return None, None
+    if agent is None:
+        print(f"[people_control_test] {log_prefix} behavior agent is not ready for {character_name}: {path}")
+        return None, None
+
+    target = navmesh_target_for_xy(agent, x, y, z)
+    tx, ty, tz = vec3_components(target)
+    invalid_task_id = behavior_task_id_invalid()
+
+    try:
+        task_id = agent.move_to(target=target, auto_brake=True)
+    except Exception as exc:
+        print(f"[people_control_test] {log_prefix} failed for {character_name}: {exc}")
+        return None, None
+
+    if task_id == invalid_task_id:
+        print(f"[people_control_test] {log_prefix} rejected for {character_name}: target=({tx:.3f}, {ty:.3f}, {tz:.3f})")
+        return None, None
+
+    print(
+        f"[people_control_test] {log_prefix} started: "
+        f"character={character_name}, target=({tx:.3f}, {ty:.3f}, {tz:.3f}), yaw={yaw_degrees:g}, task_id={task_id}"
+    )
+    return agent, task_id
+
+
+def start_behavior_sit(
+    character_name: str,
+    target_path: str,
+    log_prefix: str = "Sit",
+) -> tuple[object | None, int | None]:
+    character_name = str(character_name or "").strip()
+    target_path = ensure_sit_effector(str(target_path or "").strip())
+    if not character_name or not target_path:
+        print(f"[people_control_test] {log_prefix} requested without a character or target.")
+        return None, None
+
+    agent, path = get_behavior_agent(character_name)
+    if path is None:
+        print(f"[people_control_test] {log_prefix} character not found: {character_name}")
+        return None, None
+    if agent is None:
+        print(f"[people_control_test] {log_prefix} behavior agent is not ready for {character_name}: {path}")
+        return None, None
+
+    invalid_task_id = behavior_task_id_invalid()
+    try:
+        task_id = agent.sit(target_path, snap_to_seat=SIT_SNAP_TO_SEAT)
+    except Exception as exc:
+        print(f"[people_control_test] {log_prefix} failed for {character_name}: {exc}")
+        return None, None
+
+    if task_id == invalid_task_id:
+        print(f"[people_control_test] {log_prefix} rejected for {character_name}: target={target_path}")
+        return None, None
+
+    print(
+        f"[people_control_test] {log_prefix} started: "
+        f"character={character_name}, target={target_path}, snap_to_seat={SIT_SNAP_TO_SEAT}, task_id={task_id}"
+    )
+    return agent, task_id
+
+
+def start_behavior_idle(
+    character_name: str,
+    log_prefix: str = "Idle",
+) -> tuple[object | None, int | None]:
+    character_name = str(character_name or "").strip()
+    if not character_name:
+        print(f"[people_control_test] {log_prefix} requested without a character.")
+        return None, None
+
+    agent, path = get_behavior_agent(character_name)
+    if path is None:
+        print(f"[people_control_test] {log_prefix} character not found: {character_name}")
+        return None, None
+    if agent is None:
+        print(f"[people_control_test] {log_prefix} behavior agent is not ready for {character_name}: {path}")
+        return None, None
+
+    invalid_task_id = behavior_task_id_invalid()
+    try:
+        task_id = agent.idle()
+    except Exception as exc:
+        print(f"[people_control_test] {log_prefix} failed for {character_name}: {exc}")
+        return None, None
+
+    if task_id == invalid_task_id:
+        print(f"[people_control_test] {log_prefix} rejected for {character_name}.")
+        return None, None
+
+    print(f"[people_control_test] {log_prefix} started: character={character_name}, task_id={task_id}")
+    return agent, task_id
+
+
+def move_character_to_xy(character_name: str, x: float, y: float, yaw_degrees: float = 0.0) -> None:
+    agent, task_id = start_behavior_goto(character_name, x, y, 0.0, yaw_degrees)
+    if agent is None or task_id is None:
+        return
+
+    if STATUS_LABEL:
+        STATUS_LABEL.text = f"GoTo {character_name}: ({float(x):.2f}, {float(y):.2f})"
 
 
 def random_look_at_target(agent, radius: float, height: float) -> tuple[float, float, float] | None:
@@ -451,10 +717,6 @@ def look_at_all_characters(duration: float = LOOK_AT_DEFAULT_DURATION, radius: f
         STATUS_LABEL.text = f"LookAt all: {started}/{len(skelroots)}"
 
 
-def agent_command_done(agent) -> bool:
-    return agent is not None and agent.current_command is None and not agent.commands
-
-
 def parse_repeat_count(value):
     if value is None:
         return 1
@@ -474,6 +736,9 @@ class PlanNode:
     def status(self) -> str:
         return "done"
 
+    def cancel(self) -> None:
+        pass
+
 
 class CommandNode(PlanNode):
     def __init__(self, command: str):
@@ -482,12 +747,12 @@ class CommandNode(PlanNode):
         self.started_at = None
         self.expected_command_name = ""
         self.command_text = ""
+        self.behavior_agent = None
+        self.behavior_task_id = None
+        self.uses_behavior_agent = False
+        self.duration = -1.0
 
     def tick(self, controller) -> bool:
-        agent = get_agent(controller.character_name)
-        if agent is None:
-            return False
-
         if not self.started:
             self.command_text = controller.render_command(self.command)
             agent_name = command_agent_name(self.command_text)
@@ -500,25 +765,105 @@ class CommandNode(PlanNode):
 
             self.expected_command_name = command_type(self.command_text)
             print(f"[people_control_test] {controller.character_name} -> {self.command_text}")
-            agent.replace_command([self.command_text])
+
+            goto = parse_goto_command(self.command_text)
+            if goto is not None:
+                self.behavior_agent, self.behavior_task_id = start_behavior_goto(
+                    goto["character"],
+                    goto["x"],
+                    goto["y"],
+                    goto["z"],
+                    goto["yaw"],
+                    log_prefix="Patrol GoTo",
+                )
+                self.uses_behavior_agent = True
+                self.started = True
+                self.started_at = time.monotonic()
+                if self.behavior_agent is None or self.behavior_task_id is None:
+                    print(
+                        "[people_control_test] Patrol command could not start; "
+                        f"releasing {controller.character_name} controller."
+                    )
+                    controller.released = True
+                    return True
+                return False
+
+            sit = parse_sit_command(self.command_text)
+            if sit is not None:
+                self.behavior_agent, self.behavior_task_id = start_behavior_sit(
+                    sit["character"],
+                    sit["target"],
+                    log_prefix="Sit",
+                )
+                self.uses_behavior_agent = True
+                self.duration = sit["duration"]
+                self.started = True
+                self.started_at = time.monotonic()
+                if self.behavior_agent is None or self.behavior_task_id is None:
+                    print(
+                        "[people_control_test] Sit command could not start; "
+                        f"releasing {controller.character_name} controller."
+                    )
+                    controller.released = True
+                    return True
+                return False
+
+            idle = parse_idle_command(self.command_text)
+            if idle is not None:
+                self.behavior_agent, self.behavior_task_id = start_behavior_idle(
+                    idle["character"],
+                    log_prefix="Idle",
+                )
+                self.uses_behavior_agent = True
+                self.duration = idle["duration"]
+                self.started = True
+                self.started_at = time.monotonic()
+                if self.behavior_agent is None or self.behavior_task_id is None:
+                    print(
+                        "[people_control_test] Idle command could not start; "
+                        f"releasing {controller.character_name} controller."
+                    )
+                    controller.released = True
+                    return True
+                return False
+
+            print(
+                "[people_control_test] Unsupported Isaac 6 command; "
+                f"releasing {controller.character_name}: {self.command_text}"
+            )
+            controller.released = True
             self.started = True
             self.started_at = time.monotonic()
-            return False
+            return True
 
-        if agent.current_command is not None and self.expected_command_name:
-            running_name = agent.current_command.get_command_name()
-            if running_name != self.expected_command_name and time.monotonic() - self.started_at > 0.5:
-                print(
-                    f"[people_control_test] {controller.character_name} switched to {running_name}; releasing controller."
-                )
-                controller.released = True
+        if self.uses_behavior_agent:
+            if self.behavior_agent is None or self.behavior_task_id is None:
                 return True
+            if self.duration > 0.0 and self.started_at is not None:
+                if time.monotonic() - self.started_at >= self.duration:
+                    self.cancel()
+                    return True
+            return not self.behavior_agent.is_task_running(self.behavior_task_id)
 
-        return agent_command_done(agent)
+        return True
 
     def status(self) -> str:
         command = self.expected_command_name or command_type(self.command)
+        if self.uses_behavior_agent and self.behavior_agent is not None and self.behavior_task_id is not None:
+            try:
+                status = self.behavior_agent.get_task_status(self.behavior_task_id)
+                return f"behavior={command}, status={status}"
+            except Exception:
+                return f"behavior={command}"
         return f"command={command}" if command else "command"
+
+    def cancel(self) -> None:
+        if self.uses_behavior_agent and self.behavior_agent is not None and self.behavior_task_id is not None:
+            try:
+                if self.behavior_agent.is_task_running(self.behavior_task_id):
+                    self.behavior_agent.cancel_task(self.behavior_task_id)
+            except Exception as exc:
+                print(f"[people_control_test] Unable to cancel behavior task {self.behavior_task_id}: {exc}")
 
 
 class WaitNode(PlanNode):
@@ -547,6 +892,8 @@ class SequenceNode(PlanNode):
         while self.index < len(self.children):
             if not self.children[self.index].tick(controller):
                 return False
+            if controller.released:
+                return True
             self.index += 1
         return True
 
@@ -554,6 +901,10 @@ class SequenceNode(PlanNode):
         if not self.children:
             return "sequence=done"
         return f"step={min(self.index + 1, len(self.children))}/{len(self.children)}"
+
+    def cancel(self) -> None:
+        if 0 <= self.index < len(self.children):
+            self.children[self.index].cancel()
 
 
 class ParallelNode(PlanNode):
@@ -572,6 +923,11 @@ class ParallelNode(PlanNode):
     def status(self) -> str:
         return f"parallel={len(self.done_indexes)}/{len(self.children)}"
 
+    def cancel(self) -> None:
+        for index, child in enumerate(self.children):
+            if index not in self.done_indexes:
+                child.cancel()
+
 
 class RepeatNode(PlanNode):
     def __init__(self, child_spec, count):
@@ -585,6 +941,8 @@ class RepeatNode(PlanNode):
             return True
         if not self.child.tick(controller):
             return False
+        if controller.released:
+            return True
 
         self.completed += 1
         if self.count != "inf" and self.completed >= self.count:
@@ -597,6 +955,9 @@ class RepeatNode(PlanNode):
         if self.count == "inf":
             return f"loop={self.completed + 1}/inf"
         return f"loop={min(self.completed + 1, self.count)}/{self.count}"
+
+    def cancel(self) -> None:
+        self.child.cancel()
 
 
 def make_plan_node(spec) -> PlanNode:
@@ -658,15 +1019,17 @@ class CharacterController:
         return normalize_command_line(format_template(command, variables))
 
     def tick(self) -> bool:
-        return self.released or self.plan.tick(self)
+        if self.released:
+            return True
+        done = self.plan.tick(self)
+        return self.released or done
 
     def cancel(self) -> None:
+        self.plan.cancel()
         self.released = True
 
     def status_line(self) -> str:
-        agent = get_agent(self.character_name)
-        queued = len(agent.commands) if agent is not None else 0
-        return f"{self.character_name}: {self.label}, {current_command_name(agent)}, queued={queued}, {self.plan.status()}"
+        return f"{self.character_name}: {self.label}, {self.plan.status()}"
 
 
 def extract_command_lines(spec) -> list[str]:
@@ -792,14 +1155,6 @@ class ScenarioRunner:
 SCENARIO_RUNNER = ScenarioRunner()
 
 
-def current_command_name(agent) -> str:
-    if agent is None:
-        return "not registered"
-    if agent.current_command is not None:
-        return agent.current_command.get_command_name()
-    return "queued" if agent.commands else "done"
-
-
 def refresh_status(force_log: bool = False) -> None:
     global LAST_STATUS_LOG_TIME
 
@@ -855,6 +1210,11 @@ def run_button(button: dict, selected_character: dict, x_model, y_model, r_model
         duration = float(button.get("duration", LOOK_AT_DEFAULT_DURATION))
         radius = float(button.get("radius", LOOK_AT_DEFAULT_RADIUS))
         look_at_all_characters(duration=duration, radius=radius)
+        return
+    elif action == "go_to_selected":
+        SCENARIO_RUNNER.stop_all()
+        variables = ui_variables(selected_character, x_model, y_model, r_model)
+        move_character_to_xy(variables["character"], variables["x"], variables["y"], variables["r"])
         return
     elif action == "stop":
         SCENARIO_RUNNER.stop_all()
@@ -935,21 +1295,53 @@ open_stage()
 strip_nested_rigid_bodies()
 configure_people()
 bake_navmesh()
-setup_saved_characters()
 ensure_behavior_agents()
-init_behavior_scripts()
 control_window = build_ui()
 
 omni.timeline.get_timeline_interface().play()
-if PEOPLE_TEST_AUTO_LOOK_AT:
+if PEOPLE_TEST_AUTO_LOOK_AT or PEOPLE_TEST_AUTO_GOTO or PEOPLE_TEST_AUTO_PATROL or PEOPLE_TEST_AUTO_SIT:
     for _ in range(30):
         simulation_app.update()
+
+if PEOPLE_TEST_AUTO_GOTO:
+    move_character_to_xy(
+        os.environ.get("PEOPLE_TEST_AUTO_GOTO_CHARACTER", "Male_patient_01"),
+        float(os.environ.get("PEOPLE_TEST_AUTO_GOTO_X", "6.7")),
+        float(os.environ.get("PEOPLE_TEST_AUTO_GOTO_Y", "0.0")),
+        float(os.environ.get("PEOPLE_TEST_AUTO_GOTO_R", "0.0")),
+    )
+
+if PEOPLE_TEST_AUTO_LOOK_AT:
     look_at_all_characters()
-    if PEOPLE_TEST_EXIT_AFTER_AUTO:
-        for _ in range(30):
+
+if PEOPLE_TEST_AUTO_PATROL:
+    cfg = load_yaml_config()
+    scenario = cfg.get("scenarios", {}).get("set_patrol")
+    if scenario:
+        SCENARIO_RUNNER.start("Set patrol", scenario, {})
+        for _ in range(int(os.environ.get("PEOPLE_TEST_AUTO_PATROL_FRAMES", "120"))):
+            refresh_status()
             simulation_app.update()
-        simulation_app.close()
-        raise SystemExit(0)
+
+if PEOPLE_TEST_AUTO_SIT:
+    cfg = load_yaml_config()
+    scenario = cfg.get("scenarios", {}).get("set_sit")
+    if scenario:
+        SCENARIO_RUNNER.start("Set Sit", scenario, {})
+        for _ in range(int(os.environ.get("PEOPLE_TEST_AUTO_SIT_FRAMES", "120"))):
+            refresh_status()
+            simulation_app.update()
+
+if (
+    PEOPLE_TEST_AUTO_LOOK_AT
+    or PEOPLE_TEST_AUTO_GOTO
+    or PEOPLE_TEST_AUTO_PATROL
+    or PEOPLE_TEST_AUTO_SIT
+) and PEOPLE_TEST_EXIT_AFTER_AUTO:
+    for _ in range(30):
+        simulation_app.update()
+    simulation_app.close()
+    raise SystemExit(0)
 
 while simulation_app.is_running():
     refresh_status()
