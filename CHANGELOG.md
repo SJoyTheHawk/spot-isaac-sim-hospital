@@ -11,6 +11,44 @@
 
 - Hardened the combined Spot + people launcher by using TAA antialiasing, disabling multi-GPU, and skipping Isaac's default empty stage creation before opening the character hospital USD.
 
+### Removed
+
+- Removed the deprecated Isaac Sim 5 command-string scheduler and legacy command adapter from the people-only control UI.
+- Removed ragdoll fall startup settings and native `agent.fall()` calls after confirming they crash the full Isaac Sim 6 hospital scene.
+- Removed deprecated runtime people command-file setup from the combined Spot + people launcher.
+
+### Changed
+
+- Updated README people-simulation examples to use the Isaac Sim 6 structured YAML action format and character scene path.
+
+## 2.1.0 - 2026-06-26
+
+### Added
+
+- Added structured YAML people command support for Isaac Sim 6 BehaviorAgent actions.
+- Added a people action registry for native actions, scheduler actions, and composite actions.
+- Added per-character sequence, repeat, wait, patrol, look-around, talk, and talk-with behavior execution.
+- Added sit target setup through `/Behavior/Sit` and `/Behavior/Sit_Hips`, including configurable hips offsets, hips rotation, and seat snapping.
+- Added documentation and action prototypes for configuring `assets/people_initial_commands.yaml`.
+
+### Changed
+
+- Converted `assets/people_initial_commands.yaml` from Isaac Sim 5-style command strings to structured Isaac Sim 6 action objects.
+- Updated the people-only simulation flow to use the Isaac Sim 6 character hierarchy under `/World/Characters/Behavior_Tree_Group`.
+- Updated selected-character commands so `GoTo` uses the selected UI character and target X/Y fields through the structured action system.
+- Updated reset and teleport direction handling to keep the official `facing` field while applying the required numeric yaw compensation safely.
+
+### Removed
+
+- Removed deprecated Isaac Sim 5-only paths from the people-only control UI, including legacy command-string execution and runtime command-file control.
+
+### Fixed
+
+- Fixed selector display names so characters are shown by their scenario prim names instead of nested `ManRoot` prim names.
+- Fixed `idle` after `sit` by cancelling active action tasks and passing a safe fallback facing direction.
+- Fixed timed action handoff so duration-based actions advance cleanly without immediately repeating or getting stuck.
+- Fixed missing scene path updates for the Isaac Sim 6 hospital character scene.
+
 ## 2.0.1 - 2026-05-10
 
 ### Added

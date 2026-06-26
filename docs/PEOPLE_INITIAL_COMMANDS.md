@@ -86,6 +86,19 @@ selected_goto:
       yaw: "{r}"
 ```
 
+The Fall button uses the selected character only:
+
+```yaml
+- label: "Fall"
+  scenario: "selected_fall"
+
+selected_fall:
+  label: "Fall"
+  actions:
+    - character: "{character}"
+      action: fall
+```
+
 ## Scenario Rules
 
 Each scenario has a `label` and an `actions` list.
@@ -370,10 +383,30 @@ The overlay does two things:
   target_character: Male_patient_05
   duration: 9999
   gesture:
-    hand: right
-    sequence: [open, point, relaxed]
+    hands:
+      left:
+        action: [open, relaxed]
+      right:
+        action: [relaxed, point]
     interval: 1.8
+    look_height: 1.45
+    reach_height: 1.05
+    reach_distance: 0.55
+    hand_spread: 0.28
+    motion_scale: 0.45
+    interval_jitter: 0.35
+    look_height_jitter: 0.12
+    reach_height_jitter: 0.12
+    reach_distance_jitter: 0.2
+    initial_delay_jitter: 1.2
+    response_chance: 0.65
+    randomize: true
 ```
+
+`look_height` aims gaze at the other person's upper body instead of their root prim near the floor. `reach_height` and `reach_distance` place the hand gesture forward at chest height.
+`hands.left.action` and `hands.right.action` send separate hand pose actions. `hand_spread` offsets those hand targets sideways so both hands do not point at the same exact point.
+The jitter fields add small random changes each gesture cycle. `response_chance` controls how often both people gesture in the same cycle; lower values make the conversation alternate more.
+`initial_delay_jitter` staggers the first gesture so multiple talking pairs do not begin on the same frame.
 
 You can reuse the shared gesture anchor:
 
@@ -423,6 +456,13 @@ Use the selected character and X/Y/Yaw UI fields:
 - label: "GoTo"
   action: "go_to_selected"
   scenario: "selected_goto"
+```
+
+Use the selected character without position fields:
+
+```yaml
+- label: "Fall"
+  scenario: "selected_fall"
 ```
 
 Trigger one random look-at action for all characters:
@@ -525,6 +565,8 @@ Follow a prim:
 ```
 
 ### fall
+
+`fall` is reserved for a future stable fall animation. Native Isaac ragdoll fall is not enabled by this project because enabling `/exts/omni.anim.behavior.core/enableRagdollPhysics` crashes the full hospital scene in Isaac Sim 6.0.1. For now, the Fall button logs a skip instead of calling `agent.fall()`.
 
 ```yaml
 - character: Male_patient_01
@@ -776,8 +818,11 @@ Patrol with per-point waits should be written as repeated steps:
   target_character: Male_nurse_02
   duration: 9999
   gesture:
-    hand: right
-    sequence: [open, point, relaxed]
+    hands:
+      left:
+        action: [open, relaxed]
+      right:
+        action: [relaxed, point]
     interval: 1.8
 ```
 

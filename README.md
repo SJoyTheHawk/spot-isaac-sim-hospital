@@ -91,7 +91,7 @@ The hospital USD path is resolved by `scripts/run_isaac.sh` in this order:
 2. `assets/isaac_hospital_scene_spot.usd` inside the repo (default)
 
 The combined Spot + people bridge resolves its stage from `SPOT_PEOPLE_USD`,
-then falls back to `assets/isaac_hospital_scene_spot_w_characters.usd`.
+then falls back to `assets/isaac_hospital_scene_spot_w_characters_6.usd`.
 
 So a fresh clone runs without editing any absolute path.
 
@@ -105,9 +105,9 @@ So a fresh clone runs without editing any absolute path.
 ./scripts/run_spot_bridge_with_people.sh
 ```
 
-This launches one Isaac Sim app with the character-enabled hospital USD,
-registers saved people under `/World/Characters`, opens the **People Control
-Test** window, then enables the ROS 2 bridge for Spot. Use this mode when you
+This launches one Isaac Sim app with the Isaac Sim 6 character-enabled hospital
+USD, opens the **People Control Test** window, then enables the ROS 2 bridge for
+Spot. Use this mode when you
 want robot sensors, `/cmd_vel`, `/clock`, `/odom`, `/tf`, and animated people
 in the same simulation.
 
@@ -184,10 +184,8 @@ ros2 run rqt_robot_steering rqt_robot_steering
 
 The character test scene can also run without Spot or ROS 2:
 
-- USD: `assets/isaac_hospital_scene_spot_w_characters.usd`
-- character assets: `assets/characters/`
+- USD: `assets/isaac_hospital_scene_spot_w_characters_6.usd`
 - UI / scenario file: `assets/people_initial_commands.yaml`
-- runtime command scratch file: `/tmp/spot_isaac_people_runtime_commands.txt`
 
 Launch it with:
 
@@ -195,9 +193,9 @@ Launch it with:
 ./scripts/run_people_sim.sh
 ```
 
-This opens the hospital scene with saved characters under `/World/Characters`,
-bakes an Isaac Sim people navmesh, attaches the animation graph / behavior
-scripts, and opens a small **People Control Test** window. The window lets you
+This opens the hospital scene with authored Isaac Sim 6 characters under
+`/World/Characters/Behavior_Tree_Group`, bakes an Isaac Sim people navmesh,
+ensures `BehaviorAgentAPI` is present, and opens a small **People Control Test** window. The window lets you
 select one character, enter `X`, `Y`, and `Yaw`, then trigger scenarios from
 the YAML-defined buttons. Current examples include initialization, patrols,
 seated people, talking pairs, look-around actions, and selected-character
@@ -213,56 +211,31 @@ authoring surface, not only visual decoration.
 
 ## Character Scenario Markup
 
-`assets/people_initial_commands.yaml` is a small markup layer over
-`omni.anim.people` command strings. It has two top-level keys:
+`assets/people_initial_commands.yaml` uses structured Isaac Sim 6 action
+objects. It has two top-level keys:
 
 - `buttons`: up to 9 UI buttons. Each button can provide `label`, `scenario`,
   and optional `action` (`reset` or `stop`).
 - `scenarios`: named scenario definitions referenced by the buttons.
 
-The underlying command-line format is:
-
-```text
-<character_name> <action> <arguments...> <duration_or_yaw>
-```
-
-Examples:
-
-```text
-Female_patient_05 Idle 9999
-Female_visitor_04 LookAround 9999
-Female_police_01 GoTo 19.2 30.89 0.0 0.0
-Female_visitor_02 Sit /World/Chair/SM_Chair_02a7_01 9999
-Male_nurse_04 Talk Male_nurse_02 9999
-Female_nurse_05 TalkWith Male_patient_05 9999
-```
-
-Supported scenario nodes:
-
-| Node type | YAML keys | Purpose |
-| --------- | --------- | ------- |
-| `command` | `command` | Run one people command for one character |
-| `commands` | `commands` | Run a list of command strings, grouped by character |
-| `wait` | `seconds` or `duration` | Pause a sequence before the next step |
-| `sequence` | `steps` | Run child nodes in order |
-| `parallel` | `children` | Run child scenario branches together |
-| `repeat` | `count`, plus `steps`, `commands`, `command`, or `child` | Repeat a plan; `inf`, `infinite`, `forever`, or `0` mean endless |
-
-Scenarios can target specific characters with a `characters` mapping:
+Top-level `actions` run in parallel. A character can run ordered `steps`, and
+`repeat: forever` keeps patrols or motion loops alive. Scenarios can target
+specific characters directly:
 
 ```yaml
 scenarios:
   set_patrol:
     label: "Set patrol"
-    characters:
-      Female_police_01:
-        type: repeat
-        count: inf
+    actions:
+      - character: Female_police_01
+        repeat: forever
         steps:
-          - type: command
-            command: "Female_police_01 GoTo 19.2 30.89 0.0 0.0"
-          - type: command
-            command: "Female_police_01 GoTo 17.5 3.19 0.0 180.0"
+          - action: move_to
+            position: [19.2, 30.89, 0.0]
+            yaw: 0.0
+          - action: move_to
+            position: [17.5, 3.19, 0.0]
+            yaw: 180.0
 ```
 
 The UI-selected character and target pose are available as template variables:
@@ -271,14 +244,18 @@ The UI-selected character and target pose are available as template variables:
 ```yaml
 selected_goto:
   label: "GoTo"
-  characters:
-    "{character}":
-      type: command
-      command: "{character} GoTo {x} {y} 0.0 {r}"
+  actions:
+    - character: "{character}"
+      action: move_to
+      position: ["{x}", "{y}", 0.0]
+      yaw: "{r}"
 ```
 
-Use long durations such as `9999` for persistent idle, sit, talk, or
-look-around states.
+Use `wait.seconds` for sequence pauses. `duration` is optional and should only
+be used for hold/loop/overlay behavior such as `idle`, `look_at`, `look_around`,
+`pose_hand`, `talk`, or `custom_action`. See
+[`docs/PEOPLE_INITIAL_COMMANDS.md`](docs/PEOPLE_INITIAL_COMMANDS.md) for the full
+action reference and prototypes.
 
 ---
 
@@ -417,11 +394,10 @@ see [`docs/RUN_SIMULATION.md`](docs/RUN_SIMULATION.md).
 │   ├── list_graphs.py          # debug: dump all OmniGraph nodes
 │   ├── rtx_lidar.py            # debug: RTX lidar prim helper
 │   └── export_tf_pose.py       # debug: dump TF tree for sanity-checking
-├── assets/                     # USD scenes, character assets and command configs
+├── assets/                     # USD scenes and structured people scenario configs
 │   ├── isaac_hospital_scene_spot.usd
-│   ├── isaac_hospital_scene_spot_w_characters.usd
+│   ├── isaac_hospital_scene_spot_w_characters_6.usd
 │   ├── people_initial_commands.yaml
-│   ├── characters/
 │   └── scene_positions.txt     # prim pose dump for world editing
 ├── ros2_ws/src/spot_hospital_bringup/
 │   ├── urdf/spot.urdf          # Spot URDF (used by robot_state_publisher)

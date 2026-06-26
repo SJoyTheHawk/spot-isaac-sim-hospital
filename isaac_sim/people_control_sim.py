@@ -55,7 +55,23 @@ LOOK_AT_DEFAULT_HEIGHT = 1.45
 LOOK_AROUND_DEFAULT_INTERVAL = 3.0
 TALK_DEFAULT_DURATION = 10.0
 TALK_DEFAULT_INTERVAL = 1.8
-TALK_DEFAULT_GESTURES = ["open", "point", "relaxed"]
+TALK_DEFAULT_ACTIONS = ["open", "relaxed"]
+TALK_DEFAULT_HAND_ACTIONS = {
+    "left": ["open", "relaxed"],
+    "right": ["relaxed", "point"],
+}
+TALK_DEFAULT_HANDS = list(TALK_DEFAULT_HAND_ACTIONS)
+TALK_LOOK_HEIGHT = 1.45
+TALK_REACH_HEIGHT = 1.15
+TALK_REACH_DISTANCE = 0.85
+TALK_HAND_SPREAD = 0.28
+TALK_REACH_MOTION_SCALE = 0.65
+TALK_INTERVAL_JITTER = 0.35
+TALK_LOOK_HEIGHT_JITTER = 0.12
+TALK_REACH_HEIGHT_JITTER = 0.12
+TALK_REACH_DISTANCE_JITTER = 0.2
+TALK_RESPONSE_CHANCE = 0.65
+TALK_INITIAL_DELAY_JITTER = 1.2
 SIT_SNAP_TO_SEAT = _env_flag("PEOPLE_SIT_SNAP_TO_SEAT", True)
 SIT_HIPS_OFFSET_X = _env_optional_float("PEOPLE_SIT_HIPS_OFFSET_X")
 SIT_HIPS_OFFSET_Y = _env_optional_float("PEOPLE_SIT_HIPS_OFFSET_Y")
@@ -344,34 +360,6 @@ def iter_yaml_actions(value):
         yield from iter_yaml_actions(item)
 
 
-def normalize_command_line(line: str) -> str:
-    parts = line.split()
-    if len(parts) < 2:
-        return line.strip()
-    command = parts[1].upper()
-    if command == "IDLE":
-        parts[1] = "Idle"
-    elif command == "SIT":
-        parts[1] = "Sit"
-    elif command in {"LOOKAROUND", "LOOK_AROUND"}:
-        parts[1] = "LookAround"
-    elif command == "GOTO":
-        parts[1] = "GoTo"
-    if parts[1] == "GoTo" and len(parts) == 5:
-        parts.append("_")
-    return " ".join(parts)
-
-
-def command_agent_name(line: str) -> str:
-    parts = line.split()
-    return parts[0] if parts else ""
-
-
-def command_type(line: str) -> str:
-    parts = normalize_command_line(line).split()
-    return parts[1] if len(parts) > 1 else ""
-
-
 def format_template(value, variables: dict | None = None) -> str:
     text = str(value)
     if not variables:
@@ -413,6 +401,62 @@ def as_bool(value, default: bool = False) -> bool:
     if isinstance(value, (int, float)):
         return bool(value)
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def clamp(value: float, low: float, high: float) -> float:
+    return max(float(low), min(float(high), float(value)))
+
+
+def random_jitter(amount: float, rng=None) -> float:
+    amount = max(0.0, float(amount))
+    rng = rng or random
+    return rng.uniform(-amount, amount) if amount > 0.0 else 0.0
+
+
+def random_positive_jittered(base: float, amount: float, minimum: float = 0.1, rng=None) -> float:
+    return max(float(minimum), float(base) + random_jitter(amount, rng=rng))
+
+
+def normalized_hand_name(value) -> str | None:
+    text = str(value or "").strip().lower().replace("-", "_")
+    if text in {"left", "left_hand"}:
+        return "left"
+    if text in {"right", "right_hand"}:
+        return "right"
+    return None
+
+
+def normalized_talk_actions(value, default=None) -> list[str]:
+    fallback = list(default or TALK_DEFAULT_ACTIONS)
+    if value is None:
+        return fallback
+    if isinstance(value, str):
+        text = value.strip()
+        return [text] if text else fallback
+    try:
+        actions = [str(item).strip() for item in value if not is_blank(item)]
+    except TypeError:
+        text = str(value).strip()
+        return [text] if text else fallback
+    return actions or fallback
+
+
+def parse_talk_hand_actions(value) -> dict[str, list[str]]:
+    if not isinstance(value, dict):
+        return {hand: list(actions) for hand, actions in TALK_DEFAULT_HAND_ACTIONS.items()}
+
+    hand_actions = {}
+    for hand_key, hand_spec in value.items():
+        hand = normalized_hand_name(hand_key)
+        if hand is None:
+            continue
+        if isinstance(hand_spec, dict):
+            action_value = hand_spec.get("action")
+        else:
+            action_value = hand_spec
+        hand_actions[hand] = normalized_talk_actions(action_value, TALK_DEFAULT_HAND_ACTIONS.get(hand))
+
+    return hand_actions or {hand: list(actions) for hand, actions in TALK_DEFAULT_HAND_ACTIONS.items()}
 
 
 def is_blank(value) -> bool:
@@ -469,6 +513,53 @@ def character_target_path(character_name: str) -> str | None:
     return str(skelroot.GetPath()) if skelroot is not None else None
 
 
+def agent_world_position(agent) -> tuple[float, float, float] | None:
+    try:
+        return vec3_components(agent.get_world_translation())
+    except Exception:
+        return None
+
+
+def offset_position(position: tuple[float, float, float], height: float = 0.0) -> carb.Float3:
+    x, y, z = position
+    return carb.Float3(float(x), float(y), float(z) + float(height))
+
+
+def talk_midpoint_target(
+    source_agent,
+    target_agent,
+    height: float,
+    distance: float,
+    lateral_offset: float = 0.0,
+) -> carb.Float3 | None:
+    source_position = agent_world_position(source_agent)
+    target_position = agent_world_position(target_agent)
+    if source_position is None:
+        return None
+    sx, sy, sz = source_position
+    if target_position is None:
+        return carb.Float3(sx + float(lateral_offset), sy + float(distance), sz + float(height))
+
+    tx, ty, _tz = target_position
+    dx = tx - sx
+    dy = ty - sy
+    length = math.hypot(dx, dy)
+    if length < 1.0e-4:
+        dx, dy = 0.0, 1.0
+    else:
+        dx /= length
+        dy /= length
+
+    reach_distance = min(float(distance), max(0.2, length * 0.45))
+    side_x = -dy
+    side_y = dx
+    return carb.Float3(
+        sx + dx * reach_distance + side_x * float(lateral_offset),
+        sy + dy * reach_distance + side_y * float(lateral_offset),
+        sz + float(height),
+    )
+
+
 def resolve_target(value):
     if isinstance(value, dict):
         if "prim" in value:
@@ -492,7 +583,8 @@ def resolve_target(value):
 
 
 def action_name(spec: dict) -> str:
-    return str(spec.get("action", spec.get("type", ""))).strip().lower()
+    raw_action = spec.get("action", spec.get("type", ""))
+    return raw_action.strip().lower() if isinstance(raw_action, str) else ""
 
 
 def behavior_hand_usage(value):
@@ -604,59 +696,6 @@ def combo_box_index(model) -> int:
     if hasattr(value_model, "get_value_as_int"):
         return value_model.get_value_as_int()
     return value_model.as_int if hasattr(value_model, "as_int") else -1
-
-
-def parse_goto_command(line: str) -> dict | None:
-    parts = normalize_command_line(line).split()
-    if len(parts) < 5 or len(parts) > 6 or parts[1] != "GoTo":
-        return None
-
-    try:
-        return {
-            "character": parts[0],
-            "x": float(parts[2]),
-            "y": float(parts[3]),
-            "z": float(parts[4]),
-            "yaw": 0.0 if len(parts) < 6 or parts[5] == "_" else float(parts[5]),
-        }
-    except ValueError as exc:
-        print(f"[people_control_test] Invalid GoTo command '{line}': {exc}")
-        return None
-
-
-def parse_sit_command(line: str) -> dict | None:
-    parts = normalize_command_line(line).split()
-    if len(parts) < 3 or len(parts) > 4 or parts[1] != "Sit":
-        return None
-
-    try:
-        duration = float(parts[3]) if len(parts) > 3 else -1.0
-    except ValueError as exc:
-        print(f"[people_control_test] Invalid Sit command '{line}': {exc}")
-        return None
-
-    return {
-        "character": parts[0],
-        "target": parts[2],
-        "duration": duration,
-    }
-
-
-def parse_idle_command(line: str) -> dict | None:
-    parts = normalize_command_line(line).split()
-    if len(parts) < 2 or len(parts) > 3 or parts[1] != "Idle":
-        return None
-
-    try:
-        duration = float(parts[2]) if len(parts) > 2 else -1.0
-    except ValueError as exc:
-        print(f"[people_control_test] Invalid Idle command '{line}': {exc}")
-        return None
-
-    return {
-        "character": parts[0],
-        "duration": duration,
-    }
 
 
 def vec3_components(value) -> tuple[float, float, float]:
@@ -1017,7 +1056,11 @@ def start_behavior_action(
                 motion_scale=float(spec.get("motion_scale", 1.0)),
             )
         elif action == "fall":
-            task_id = agent.fall()
+            print(
+                f"[people_control_test] fall skipped for {character_name}: native Isaac ragdoll fall is disabled "
+                f"because enabling it crashes the full hospital scene."
+            )
+            return agent, None, True
         elif action == "sit":
             target_spec = spec.get("target", spec.get("prim", ""))
             return (*start_behavior_sit(character_name, target_spec, log_prefix=label), False)
@@ -1223,55 +1266,6 @@ class PlanNode:
         pass
 
 
-def legacy_command_to_action(command_text: str) -> dict | None:
-    command_text = normalize_command_line(command_text)
-
-    goto = parse_goto_command(command_text)
-    if goto is not None:
-        return {
-            "character": goto["character"],
-            "action": "move_to",
-            "position": [goto["x"], goto["y"], goto["z"]],
-            "yaw": goto["yaw"],
-        }
-
-    sit = parse_sit_command(command_text)
-    if sit is not None:
-        spec = {"character": sit["character"], "action": "sit", "target": {"prim": sit["target"]}}
-        if sit["duration"] > 0.0:
-            spec["duration"] = sit["duration"]
-        return spec
-
-    idle = parse_idle_command(command_text)
-    if idle is not None:
-        spec = {"character": idle["character"], "action": "idle"}
-        if idle["duration"] > 0.0:
-            spec["duration"] = idle["duration"]
-        return spec
-
-    parts = command_text.split()
-    if len(parts) >= 2:
-        command = parts[1].lower()
-        if command in {"lookaround", "look_around"}:
-            spec = {"character": parts[0], "action": "look_around"}
-            if len(parts) >= 3:
-                spec["duration"] = float(parts[2])
-            return spec
-        if command in {"talk", "talkwith", "talk_with"} and len(parts) >= 3:
-            spec = {
-                "character": parts[0],
-                "action": "talk_with" if command in {"talkwith", "talk_with"} else "talk",
-                "target_character": parts[2],
-            }
-            if len(parts) >= 4:
-                spec["duration"] = float(parts[3])
-            return spec
-        if command == "fall":
-            return {"character": parts[0], "action": "fall"}
-
-    return None
-
-
 class ActionNode(PlanNode):
     def __init__(self, spec: dict):
         self.raw_spec = dict(spec)
@@ -1335,33 +1329,6 @@ class ActionNode(PlanNode):
 
     def cancel(self) -> None:
         cancel_task(self.behavior_agent, self.behavior_task_id)
-
-
-class CommandNode(PlanNode):
-    def __init__(self, command: str):
-        self.command = str(command)
-        self.child: PlanNode | None = None
-        self.command_text = ""
-
-    def tick(self, controller) -> bool:
-        if self.child is None:
-            self.command_text = controller.render_command(self.command)
-            spec = legacy_command_to_action(self.command_text)
-            if spec is None:
-                print(f"[people_control_test] Unsupported legacy command; releasing {controller.character_name}: {self.command_text}")
-                controller.released = True
-                return True
-            self.child = make_plan_node(spec)
-        return self.child.tick(controller)
-
-    def status(self) -> str:
-        if self.child is None:
-            return f"legacy={command_type(self.command)}"
-        return self.child.status()
-
-    def cancel(self) -> None:
-        if self.child is not None:
-            self.child.cancel()
 
 
 class LookAroundNode(PlanNode):
@@ -1429,8 +1396,21 @@ class TalkOverlayNode(PlanNode):
         self.gesture_index = 0
         self.duration = TALK_DEFAULT_DURATION
         self.interval = TALK_DEFAULT_INTERVAL
-        self.sequence = list(TALK_DEFAULT_GESTURES)
-        self.hand = "right"
+        self.hand_actions = {hand: list(actions) for hand, actions in TALK_DEFAULT_HAND_ACTIONS.items()}
+        self.hands = list(TALK_DEFAULT_HANDS)
+        self.look_height = TALK_LOOK_HEIGHT
+        self.reach_height = TALK_REACH_HEIGHT
+        self.reach_distance = TALK_REACH_DISTANCE
+        self.hand_spread = TALK_HAND_SPREAD
+        self.reach_motion_scale = TALK_REACH_MOTION_SCALE
+        self.interval_jitter = TALK_INTERVAL_JITTER
+        self.look_height_jitter = TALK_LOOK_HEIGHT_JITTER
+        self.reach_height_jitter = TALK_REACH_HEIGHT_JITTER
+        self.reach_distance_jitter = TALK_REACH_DISTANCE_JITTER
+        self.response_chance = TALK_RESPONSE_CHANCE
+        self.initial_delay_jitter = TALK_INITIAL_DELAY_JITTER
+        self.randomize_actions = True
+        self.rng = random.Random()
         self.target_character = ""
         self.source_agent = None
         self.target_agent = None
@@ -1440,24 +1420,56 @@ class TalkOverlayNode(PlanNode):
         if task_id is not None and task_id != behavior_task_id_invalid():
             self.task_ids.append((agent, task_id))
 
-    def _start_look_at(self, source_name: str, target_name: str, duration: float) -> None:
-        source_agent, _source_path = get_behavior_agent(source_name)
-        target_path = character_target_path(target_name)
-        if source_agent is None or target_path is None:
+    def _start_look_at(self, source_name: str, source_agent, target_agent, duration: float) -> None:
+        target_position = agent_world_position(target_agent)
+        if source_agent is None or target_position is None:
             return
         try:
-            self._start_task(source_agent, source_agent.look_at(target=target_path, duration=duration))
+            look_height = random_positive_jittered(self.look_height, self.look_height_jitter, 0.5, rng=self.rng)
+            self._start_task(source_agent, source_agent.look_at(target=offset_position(target_position, look_height), duration=duration))
         except Exception as exc:
-            print(f"[people_control_test] talk look_at failed for {source_name} -> {target_name}: {exc}")
+            print(f"[people_control_test] talk look_at failed for {source_name}: {exc}")
 
-    def _start_pose(self, agent, preset: str) -> None:
+    def _hand_lateral_offset(self, hand: str) -> float:
+        if hand == "left":
+            return self.hand_spread
+        if hand == "right":
+            return -self.hand_spread
+        return 0.0
+
+    def _start_reach(self, source_name: str, source_agent, target_agent, hand: str, duration: float) -> None:
+        reach_height = random_positive_jittered(self.reach_height, self.reach_height_jitter, 0.4, rng=self.rng)
+        reach_distance = random_positive_jittered(self.reach_distance, self.reach_distance_jitter, 0.2, rng=self.rng)
+        target = talk_midpoint_target(
+            source_agent,
+            target_agent,
+            reach_height,
+            reach_distance,
+            self._hand_lateral_offset(hand),
+        )
+        if target is None:
+            return
+        try:
+            self._start_task(
+                source_agent,
+                source_agent.reach_hand(
+                    hand_usage=behavior_hand_usage(hand),
+                    target=target,
+                    duration=duration,
+                    motion_scale=self.reach_motion_scale,
+                ),
+            )
+        except Exception as exc:
+            print(f"[people_control_test] talk reach_hand failed for {source_name}: {exc}")
+
+    def _start_pose(self, agent, hand: str, preset: str, duration: float | None = None) -> None:
         try:
             self._start_task(
                 agent,
                 agent.pose_hand(
-                    hand_usage=behavior_hand_usage(self.hand),
+                    hand_usage=behavior_hand_usage(hand),
                     preset=behavior_hand_pose(preset),
-                    duration=max(0.1, self.interval),
+                    duration=max(0.1, duration if duration is not None else self.interval),
                 ),
             )
         except Exception as exc:
@@ -1474,11 +1486,37 @@ class TalkOverlayNode(PlanNode):
                 return True
 
             gesture = self.spec.get("gesture", {}) if isinstance(self.spec.get("gesture"), dict) else {}
-            self.hand = str(gesture.get("hand", self.spec.get("hand", "right")))
-            self.sequence = list(gesture.get("sequence", self.spec.get("sequence", TALK_DEFAULT_GESTURES)))
-            if not self.sequence:
-                self.sequence = list(TALK_DEFAULT_GESTURES)
+            self.hand_actions = parse_talk_hand_actions(gesture.get("hands"))
+            self.hands = list(self.hand_actions)
             self.interval = float(gesture.get("interval", self.spec.get("interval", TALK_DEFAULT_INTERVAL)))
+            self.look_height = float(gesture.get("look_height", self.spec.get("look_height", TALK_LOOK_HEIGHT)))
+            self.reach_height = float(gesture.get("reach_height", self.spec.get("reach_height", TALK_REACH_HEIGHT)))
+            self.reach_distance = float(gesture.get("reach_distance", self.spec.get("reach_distance", TALK_REACH_DISTANCE)))
+            self.hand_spread = float(gesture.get("hand_spread", self.spec.get("hand_spread", TALK_HAND_SPREAD)))
+            self.reach_motion_scale = float(
+                gesture.get("motion_scale", self.spec.get("motion_scale", TALK_REACH_MOTION_SCALE))
+            )
+            self.interval_jitter = float(
+                gesture.get("interval_jitter", self.spec.get("interval_jitter", TALK_INTERVAL_JITTER))
+            )
+            self.look_height_jitter = float(
+                gesture.get("look_height_jitter", self.spec.get("look_height_jitter", TALK_LOOK_HEIGHT_JITTER))
+            )
+            self.reach_height_jitter = float(
+                gesture.get("reach_height_jitter", self.spec.get("reach_height_jitter", TALK_REACH_HEIGHT_JITTER))
+            )
+            self.reach_distance_jitter = float(
+                gesture.get("reach_distance_jitter", self.spec.get("reach_distance_jitter", TALK_REACH_DISTANCE_JITTER))
+            )
+            self.response_chance = clamp(
+                float(gesture.get("response_chance", self.spec.get("response_chance", TALK_RESPONSE_CHANCE))), 0.0, 1.0
+            )
+            self.initial_delay_jitter = float(
+                gesture.get("initial_delay_jitter", self.spec.get("initial_delay_jitter", TALK_INITIAL_DELAY_JITTER))
+            )
+            self.randomize_actions = as_bool(
+                gesture.get("randomize", self.spec.get("randomize", True)), True
+            )
             self.duration = optional_duration(self.spec, TALK_DEFAULT_DURATION)
             self.source_agent, _source_path = get_behavior_agent(controller.character_name)
             self.target_agent, _target_path = get_behavior_agent(self.target_character)
@@ -1490,14 +1528,16 @@ class TalkOverlayNode(PlanNode):
                 controller.released = True
                 return True
 
+            seed_text = f"{controller.character_name}:{self.target_character}:{now:.6f}:{id(self)}"
+            self.rng.seed(seed_text)
             look_duration = self.duration if self.duration and self.duration > 0.0 else self.interval * 2.0
-            self._start_look_at(controller.character_name, self.target_character, look_duration)
-            self._start_look_at(self.target_character, controller.character_name, look_duration)
+            self._start_look_at(controller.character_name, self.source_agent, self.target_agent, look_duration)
+            self._start_look_at(self.target_character, self.target_agent, self.source_agent, look_duration)
             self.started_at = now
-            self.next_gesture_at = 0.0
+            self.next_gesture_at = now + self.rng.uniform(0.0, max(0.0, self.initial_delay_jitter))
             print(
                 f"[people_control_test] talk overlay started: "
-                f"{controller.character_name} <-> {self.target_character}, hand={self.hand}, sequence={self.sequence}"
+                f"{controller.character_name} <-> {self.target_character}, hand_actions={self.hand_actions}"
             )
 
         if self.duration is not None and self.duration > 0.0 and now - self.started_at >= self.duration:
@@ -1505,11 +1545,32 @@ class TalkOverlayNode(PlanNode):
             return True
 
         if now >= self.next_gesture_at:
-            preset = str(self.sequence[self.gesture_index % len(self.sequence)])
-            self._start_pose(self.source_agent, preset)
-            self._start_pose(self.target_agent, preset)
+            gesture_duration = random_positive_jittered(self.interval, self.interval_jitter, 0.25, rng=self.rng)
+
+            source_speaks = True
+            target_responds = self.rng.random() < self.response_chance
+            if not target_responds and self.rng.random() < 0.5:
+                source_speaks = False
+                target_responds = True
+
+            if source_speaks:
+                for hand in self.hands:
+                    actions = self.hand_actions[hand]
+                    preset = str(self.rng.choice(actions) if self.randomize_actions else actions[self.gesture_index % len(actions)])
+                    self._start_reach(controller.character_name, self.source_agent, self.target_agent, hand, gesture_duration)
+                    self._start_pose(self.source_agent, hand, preset, gesture_duration)
+            if target_responds:
+                for hand in self.hands:
+                    actions = self.hand_actions[hand]
+                    preset = str(
+                        self.rng.choice(actions)
+                        if self.randomize_actions
+                        else actions[(self.gesture_index + 1) % len(actions)]
+                    )
+                    self._start_reach(self.target_character, self.target_agent, self.source_agent, hand, gesture_duration)
+                    self._start_pose(self.target_agent, hand, preset, gesture_duration)
             self.gesture_index += 1
-            self.next_gesture_at = now + max(0.1, self.interval)
+            self.next_gesture_at = now + gesture_duration
 
         self.task_ids = [(agent, task_id) for agent, task_id in self.task_ids if task_is_running(agent, task_id)]
         return False
@@ -1625,7 +1686,8 @@ class RepeatNode(PlanNode):
 
 def make_plan_node(spec) -> PlanNode:
     if isinstance(spec, str):
-        return CommandNode(spec)
+        print(f"[people_control_test] Ignoring invalid structured plan: {spec}")
+        return PlanNode()
     if isinstance(spec, list):
         return SequenceNode([make_plan_node(step) for step in spec])
     if not isinstance(spec, dict):
@@ -1683,19 +1745,11 @@ def make_plan_node(spec) -> PlanNode:
 
     node_type = str(spec.get("type", "")).lower()
     if not node_type:
-        if "command" in spec:
-            node_type = "command"
-        elif "commands" in spec:
-            node_type = "commands"
-        elif "steps" in spec:
+        if "steps" in spec:
             node_type = "sequence"
         elif "children" in spec:
             node_type = "parallel"
 
-    if node_type == "command":
-        return CommandNode(str(spec.get("command", "")))
-    if node_type == "commands":
-        return SequenceNode([CommandNode(command) for command in spec.get("commands", [])])
     if node_type == "wait":
         return WaitNode(spec.get("seconds", spec.get("duration", 0.0)))
     if node_type == "sequence":
@@ -1707,10 +1761,8 @@ def make_plan_node(spec) -> PlanNode:
         if child_spec is None:
             if "steps" in spec:
                 child_spec = {"type": "sequence", "steps": spec.get("steps", [])}
-            elif "commands" in spec:
-                child_spec = {"type": "commands", "commands": spec.get("commands", [])}
             else:
-                child_spec = spec.get("command", "")
+                child_spec = spec.get("action_spec", {})
         return RepeatNode(child_spec, spec.get("count", 1))
 
     print(f"[people_control_test] Unknown scenario node type: {node_type}")
@@ -1725,11 +1777,6 @@ class CharacterController:
         self.label = label
         self.plan = make_plan_node(plan_spec)
         self.released = False
-
-    def render_command(self, command: str) -> str:
-        variables = dict(self.variables)
-        variables.setdefault("character", self.character_name)
-        return normalize_command_line(format_template(command, variables))
 
     def render_action(self, spec: dict) -> dict:
         variables = dict(self.variables)
@@ -1749,39 +1796,6 @@ class CharacterController:
 
     def status_line(self) -> str:
         return f"{self.character_name}: {self.label}, {self.plan.status()}"
-
-
-def extract_command_lines(spec) -> list[str]:
-    if isinstance(spec, str):
-        return [spec]
-    if isinstance(spec, list):
-        lines = []
-        for item in spec:
-            lines.extend(extract_command_lines(item))
-        return lines
-    if not isinstance(spec, dict):
-        return []
-
-    lines = []
-    if "command" in spec:
-        lines.append(str(spec["command"]))
-    if isinstance(spec.get("commands"), list):
-        lines.extend(str(command) for command in spec["commands"])
-    if isinstance(spec.get("steps"), list):
-        lines.extend(extract_command_lines(spec["steps"]))
-    if isinstance(spec.get("children"), list):
-        lines.extend(extract_command_lines(spec["children"]))
-    if "child" in spec:
-        lines.extend(extract_command_lines(spec["child"]))
-    return lines
-
-
-def command_plan(commands: list[str], count=1):
-    plan = {"type": "sequence", "steps": [{"type": "command", "command": command} for command in commands]}
-    parsed_count = parse_repeat_count(count)
-    if parsed_count == 1:
-        return plan
-    return {"type": "repeat", "count": parsed_count, "child": plan}
 
 
 class ScenarioRunner:
@@ -1868,22 +1882,11 @@ class ScenarioRunner:
                     plans[character_name] = plan_spec
             return plans
 
-        if isinstance(scenario, dict) and isinstance(scenario.get("commands"), list):
-            count = scenario.get("count", scenario.get("repeat", 1))
-            return self._compile_command_list(scenario["commands"], count, variables)
-
         if isinstance(scenario, list):
-            return self._compile_command_list(scenario, 1, variables)
+            return self._compile_actions(scenario, variables)
 
-        commands = extract_command_lines(scenario)
-        command_names = {
-            command_agent_name(normalize_command_line(format_template(command, variables))) for command in commands
-        }
-        command_names.discard("")
-        if len(command_names) == 1:
-            return {next(iter(command_names)): scenario}
-        if len(command_names) > 1:
-            print("[people_control_test] Multi-character sequence is ambiguous; use 'characters' or 'parallel'.")
+        if isinstance(scenario, dict) and ("command" in scenario or "commands" in scenario):
+            print("[people_control_test] Scenario must use structured actions.")
         return {}
 
     def _compile_actions(self, actions: list, variables: dict) -> dict[str, object]:
@@ -1916,16 +1919,6 @@ class ScenarioRunner:
                 plans[character_name] = {"steps": character_actions}
         plans.update(overlay_plans)
         return plans
-
-    def _compile_command_list(self, commands: list[str], count, variables: dict) -> dict[str, object]:
-        grouped: dict[str, list[str]] = {}
-        for command in commands:
-            rendered = normalize_command_line(format_template(command, variables))
-            character_name = command_agent_name(rendered)
-            if character_name:
-                grouped.setdefault(character_name, []).append(rendered)
-        return {character_name: command_plan(character_commands, count) for character_name, character_commands in grouped.items()}
-
 
 SCENARIO_RUNNER = ScenarioRunner()
 
