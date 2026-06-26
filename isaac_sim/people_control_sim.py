@@ -29,6 +29,7 @@ simulation_app = SimulationApp({"headless": PEOPLE_TEST_HEADLESS})
 import math
 import random
 import time
+import traceback
 
 import carb
 import omni.timeline
@@ -51,6 +52,10 @@ MOTION_LIBRARY_PRIM_PATH = f"{CHARACTER_ROOT}/HumanMotionLibrary"
 LOOK_AT_DEFAULT_DURATION = 8.0
 LOOK_AT_DEFAULT_RADIUS = 4.0
 LOOK_AT_DEFAULT_HEIGHT = 1.45
+LOOK_AROUND_DEFAULT_INTERVAL = 3.0
+TALK_DEFAULT_DURATION = 10.0
+TALK_DEFAULT_INTERVAL = 1.8
+TALK_DEFAULT_GESTURES = ["open", "point", "relaxed"]
 SIT_SNAP_TO_SEAT = _env_flag("PEOPLE_SIT_SNAP_TO_SEAT", True)
 SIT_HIPS_OFFSET_X = _env_optional_float("PEOPLE_SIT_HIPS_OFFSET_X")
 SIT_HIPS_OFFSET_Y = _env_optional_float("PEOPLE_SIT_HIPS_OFFSET_Y")
@@ -66,6 +71,31 @@ PEOPLE_TEST_EXIT_AFTER_AUTO = _env_flag("PEOPLE_TEST_EXIT_AFTER_AUTO")
 STATUS_LABEL = None
 LAST_STATUS_LOG_TIME = 0.0
 SCENARIO_RUNNER = None
+LAST_CONFIG_VALIDATION_MTIME = None
+
+NATIVE_ACTIONS = {
+    "idle",
+    "move_to",
+    "move_along",
+    "follow",
+    "dodge",
+    "fall",
+    "sit",
+    "ride",
+    "pickup_object",
+    "place_object",
+    "release_object",
+    "custom_action",
+    "look_at",
+    "reach_hand",
+    "pose_hand",
+    "reset",
+    "teleport",
+}
+SCHEDULER_ACTIONS = {"wait", "repeat"}
+COMPOSITE_ACTIONS = {"patrol", "look_around", "talk", "talk_with"}
+KNOWN_ACTIONS = NATIVE_ACTIONS | SCHEDULER_ACTIONS | COMPOSITE_ACTIONS
+BUTTON_ACTIONS = {"go_to_selected", "look_at_all", "reset", "stop"}
 
 
 def enable_people_extensions() -> None:
@@ -276,7 +306,42 @@ def ensure_behavior_agents() -> None:
 
 def load_yaml_config() -> dict:
     with open(COMMANDS_YAML_FILE, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f) or {}
+        cfg = yaml.safe_load(f) or {}
+    validate_yaml_config_once(cfg)
+    return cfg
+
+
+def validate_yaml_config_once(cfg: dict) -> None:
+    global LAST_CONFIG_VALIDATION_MTIME
+
+    try:
+        mtime = os.path.getmtime(COMMANDS_YAML_FILE)
+    except OSError:
+        mtime = None
+    if LAST_CONFIG_VALIDATION_MTIME == mtime:
+        return
+    LAST_CONFIG_VALIDATION_MTIME = mtime
+
+    unknown_actions = sorted({name for name in iter_yaml_actions(cfg) if name and name not in KNOWN_ACTIONS | BUTTON_ACTIONS})
+    if unknown_actions:
+        print(f"[people_control_test] Unknown YAML actions: {unknown_actions}")
+    else:
+        print(f"[people_control_test] YAML action registry validation passed: {COMMANDS_YAML_FILE}")
+
+
+def iter_yaml_actions(value):
+    if isinstance(value, list):
+        for item in value:
+            yield from iter_yaml_actions(item)
+        return
+    if not isinstance(value, dict):
+        return
+
+    name = action_name(value)
+    if name:
+        yield name
+    for item in value.values():
+        yield from iter_yaml_actions(item)
 
 
 def normalize_command_line(line: str) -> str:
@@ -316,6 +381,222 @@ def format_template(value, variables: dict | None = None) -> str:
     except KeyError as exc:
         print(f"[people_control_test] Missing template variable {exc} in: {text}")
         return text
+
+
+def render_templates(value, variables: dict | None = None):
+    if isinstance(value, str):
+        return format_template(value, variables)
+    if isinstance(value, list):
+        return [render_templates(item, variables) for item in value]
+    if isinstance(value, tuple):
+        return tuple(render_templates(item, variables) for item in value)
+    if isinstance(value, dict):
+        rendered = {}
+        for key, item in value.items():
+            rendered_key = format_template(key, variables) if isinstance(key, str) else key
+            rendered[rendered_key] = render_templates(item, variables)
+        return rendered
+    return value
+
+
+def as_float(value, default: float = 0.0) -> float:
+    if value is None or value == "":
+        return default
+    return float(value)
+
+
+def as_bool(value, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def is_blank(value) -> bool:
+    return value is None or (isinstance(value, str) and value.strip() == "")
+
+
+def optional_duration(spec: dict, default: float | None = None) -> float | None:
+    if not isinstance(spec, dict) or is_blank(spec.get("duration")):
+        return default
+    return float(spec["duration"])
+
+
+def vector3(value, label: str = "vector") -> carb.Float3:
+    if isinstance(value, dict):
+        if "position" in value:
+            return vector3(value["position"], label)
+        return carb.Float3(float(value.get("x", 0.0)), float(value.get("y", 0.0)), float(value.get("z", 0.0)))
+    try:
+        x, y, z = vec3_components(value)
+        return carb.Float3(x, y, z)
+    except Exception as exc:
+        raise ValueError(f"Invalid {label}: {value}") from exc
+
+
+def facing_direction(value):
+    if is_blank(value):
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        if text.startswith("/"):
+            return text
+        value = float(text)
+    if isinstance(value, (int, float)):
+        yaw_radians = math.radians(float(value) - 90.0)
+        return carb.Float3(math.cos(yaw_radians), math.sin(yaw_radians), 0.0)
+    return vector3(value, "facing")
+
+
+def vec3d_or_none(value) -> Gf.Vec3d | None:
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return Gf.Vec3d(float(value.get("x", 0.0)), float(value.get("y", 0.0)), float(value.get("z", 0.0)))
+    x, y, z = vec3_components(value)
+    return Gf.Vec3d(x, y, z)
+
+
+def character_target_path(character_name: str) -> str | None:
+    if not character_name:
+        return None
+    if str(character_name).startswith("/"):
+        return str(character_name)
+    skelroot = get_character_skelroot(str(character_name))
+    return str(skelroot.GetPath()) if skelroot is not None else None
+
+
+def resolve_target(value):
+    if isinstance(value, dict):
+        if "prim" in value:
+            return str(value["prim"])
+        if "path" in value:
+            return str(value["path"])
+        if "character" in value:
+            return character_target_path(str(value["character"])) or str(value["character"])
+        if "target_character" in value:
+            return character_target_path(str(value["target_character"])) or str(value["target_character"])
+        if "position" in value:
+            return vector3(value["position"], "target.position")
+    if isinstance(value, (list, tuple)):
+        return vector3(value, "target")
+    if isinstance(value, str):
+        text = value.strip()
+        if text.startswith("/"):
+            return text
+        return character_target_path(text) or text
+    return value
+
+
+def action_name(spec: dict) -> str:
+    return str(spec.get("action", spec.get("type", ""))).strip().lower()
+
+
+def behavior_hand_usage(value):
+    import omni.anim.behavior.core as bh_core
+
+    hand = str(value or "right").strip().lower().replace("-", "_")
+    mapping = {
+        "right": "RIGHT_HAND",
+        "right_hand": "RIGHT_HAND",
+        "left": "LEFT_HAND",
+        "left_hand": "LEFT_HAND",
+        "both": "BOTH_HANDS",
+        "both_hands": "BOTH_HANDS",
+        "none": "NONE",
+    }
+    enum_name = mapping.get(hand, "RIGHT_HAND")
+    return getattr(bh_core.BehaviorHandUsage, enum_name)
+
+
+def behavior_hand_pose(value):
+    import omni.anim.behavior.core as bh_core
+
+    preset = str(value or "relaxed").strip().lower().replace("-", "_")
+    mapping = {
+        "open": "OPEN",
+        "fist": "FIST",
+        "point": "POINT",
+        "relaxed": "RELAXED",
+    }
+    enum_name = mapping.get(preset, "RELAXED")
+    return getattr(bh_core.BehaviorHandPosePreset, enum_name)
+
+
+def behavior_root_animation(value):
+    if value in {None, ""}:
+        return None
+
+    import omni.anim.behavior.core as bh_core
+
+    enum_type = getattr(bh_core, "BehaviorRootAnimation", None)
+    if enum_type is None:
+        return None
+
+    normalized = str(value).strip().lower().replace("-", "_")
+    candidates_by_value = {
+        "ignore": ["IGNORE_ROOT_ANIMATION", "IGNORE_ROOT", "IGNORE"],
+        "keep": ["KEEP_ROOT_ANIMATION", "KEEP_ROOT", "KEEP"],
+        "use": ["USE_ROOT_ANIMATION", "USE_ROOT", "USE"],
+    }
+    for candidate in candidates_by_value.get(normalized, [str(value)]):
+        if hasattr(enum_type, candidate):
+            return getattr(enum_type, candidate)
+    return None
+
+
+def task_is_running(agent, task_id: int | None) -> bool:
+    if agent is None or task_id is None:
+        return False
+    try:
+        return agent.is_task_running(task_id)
+    except Exception:
+        return False
+
+
+def cancel_task(agent, task_id: int | None) -> None:
+    if not task_is_running(agent, task_id):
+        return
+    try:
+        agent.cancel_task(task_id)
+    except Exception as exc:
+        print(f"[people_control_test] Unable to cancel behavior task {task_id}: {exc}")
+
+
+def cancel_active_action_task(agent) -> None:
+    try:
+        active_task = agent.get_action_task_id()
+    except Exception:
+        return
+    if active_task and active_task != behavior_task_id_invalid():
+        try:
+            agent.cancel_task(active_task)
+        except Exception as exc:
+            print(f"[people_control_test] Unable to cancel active behavior task {active_task}: {exc}")
+
+
+def current_facing_direction(agent):
+    try:
+        return agent.get_facing_direction()
+    except Exception:
+        return None
+
+
+def default_facing_direction() -> carb.Float3:
+    return carb.Float3(1.0, 0.0, 0.0)
+
+
+def idle_facing_direction(agent, requested_facing=None):
+    facing = facing_direction(requested_facing)
+    if facing is not None:
+        return facing
+    facing = current_facing_direction(agent)
+    if facing is not None:
+        return facing
+    return default_facing_direction()
 
 
 def combo_box_index(model) -> int:
@@ -475,7 +756,22 @@ def apply_sit_hips_overrides(offset: Gf.Vec3d, rotation: Gf.Vec3d) -> tuple[Gf.V
     )
 
 
-def ensure_sit_effector(target_path: str) -> str:
+def parse_sit_target_spec(target_spec) -> tuple[str, Gf.Vec3d | None, Gf.Vec3d | None, bool]:
+    if isinstance(target_spec, dict):
+        target_path = str(target_spec.get("prim", target_spec.get("path", ""))).strip()
+        hips_offset = vec3d_or_none(target_spec.get("hips_offset"))
+        hips_rotation = vec3d_or_none(target_spec.get("hips_rotation"))
+        snap_to_seat = as_bool(target_spec.get("snap_to_seat"), SIT_SNAP_TO_SEAT)
+        return target_path, hips_offset, hips_rotation, snap_to_seat
+
+    return str(target_spec or "").strip(), None, None, SIT_SNAP_TO_SEAT
+
+
+def ensure_sit_effector(
+    target_path: str,
+    hips_offset: Gf.Vec3d | None = None,
+    hips_rotation: Gf.Vec3d | None = None,
+) -> str:
     stage = omni.usd.get_context().get_stage()
     if stage is None:
         return target_path
@@ -515,7 +811,10 @@ def ensure_sit_effector(target_path: str) -> str:
     if not hips_prim.IsValid():
         hips_prim = stage.DefinePrim(hips_path, "Xform")
     hips_xform = UsdGeom.Xformable(hips_prim)
-    offset, rotation = apply_sit_hips_overrides(*sit_hips_default_transform(stage, target_path))
+    default_offset, default_rotation = sit_hips_default_transform(stage, target_path)
+    offset = hips_offset if hips_offset is not None else default_offset
+    rotation = hips_rotation if hips_rotation is not None else default_rotation
+    offset, rotation = apply_sit_hips_overrides(offset, rotation)
     hips_xform.ClearXformOpOrder()
     hips_xform.AddTranslateOp().Set(offset)
     hips_xform.AddRotateXYZOp().Set(rotation)
@@ -573,11 +872,12 @@ def start_behavior_goto(
 
 def start_behavior_sit(
     character_name: str,
-    target_path: str,
+    target_spec,
     log_prefix: str = "Sit",
 ) -> tuple[object | None, int | None]:
     character_name = str(character_name or "").strip()
-    target_path = ensure_sit_effector(str(target_path or "").strip())
+    target_path, hips_offset, hips_rotation, snap_to_seat = parse_sit_target_spec(target_spec)
+    target_path = ensure_sit_effector(target_path, hips_offset=hips_offset, hips_rotation=hips_rotation)
     if not character_name or not target_path:
         print(f"[people_control_test] {log_prefix} requested without a character or target.")
         return None, None
@@ -592,7 +892,7 @@ def start_behavior_sit(
 
     invalid_task_id = behavior_task_id_invalid()
     try:
-        task_id = agent.sit(target_path, snap_to_seat=SIT_SNAP_TO_SEAT)
+        task_id = agent.sit(target_path, snap_to_seat=snap_to_seat)
     except Exception as exc:
         print(f"[people_control_test] {log_prefix} failed for {character_name}: {exc}")
         return None, None
@@ -603,7 +903,7 @@ def start_behavior_sit(
 
     print(
         f"[people_control_test] {log_prefix} started: "
-        f"character={character_name}, target={target_path}, snap_to_seat={SIT_SNAP_TO_SEAT}, task_id={task_id}"
+        f"character={character_name}, target={target_path}, snap_to_seat={snap_to_seat}, task_id={task_id}"
     )
     return agent, task_id
 
@@ -627,7 +927,8 @@ def start_behavior_idle(
 
     invalid_task_id = behavior_task_id_invalid()
     try:
-        task_id = agent.idle()
+        cancel_active_action_task(agent)
+        task_id = agent.idle(facing=idle_facing_direction(agent))
     except Exception as exc:
         print(f"[people_control_test] {log_prefix} failed for {character_name}: {exc}")
         return None, None
@@ -638,6 +939,188 @@ def start_behavior_idle(
 
     print(f"[people_control_test] {log_prefix} started: character={character_name}, task_id={task_id}")
     return agent, task_id
+
+
+def action_target(spec: dict, agent=None, snap_position: bool = False):
+    if "position" in spec:
+        target = vector3(spec["position"], "position")
+        if snap_position and agent is not None:
+            x, y, z = vec3_components(target)
+            return navmesh_target_for_xy(agent, x, y, z)
+        return target
+    if "target_character" in spec:
+        return resolve_target({"character": spec["target_character"]})
+    if "target" in spec:
+        return resolve_target(spec["target"])
+    return None
+
+
+def call_with_optional_duration(func, duration: float | None, **kwargs):
+    if duration is None:
+        return func(**kwargs)
+    return func(duration=duration, **kwargs)
+
+
+def start_behavior_action(
+    character_name: str,
+    spec: dict,
+    log_prefix: str | None = None,
+) -> tuple[object | None, int | None, bool]:
+    action = action_name(spec)
+    label = log_prefix or action
+    if action not in NATIVE_ACTIONS:
+        print(f"[people_control_test] Unsupported structured action for {character_name}: {action}")
+        return None, None, False
+
+    character_name = str(character_name or spec.get("character", "")).strip()
+    if not character_name:
+        print(f"[people_control_test] {label} requested without a character.")
+        return None, None, False
+
+    agent, path = get_behavior_agent(character_name)
+    if path is None:
+        print(f"[people_control_test] {label} character not found: {character_name}")
+        return None, None, False
+    if agent is None:
+        print(f"[people_control_test] {label} behavior agent is not ready for {character_name}: {path}")
+        return None, None, False
+
+    try:
+        if action == "idle":
+            cancel_active_action_task(agent)
+            task_id = agent.idle(facing=idle_facing_direction(agent, spec.get("facing", spec.get("yaw"))))
+        elif action == "move_to":
+            target = action_target(spec, agent=agent, snap_position="position" in spec)
+            if target is None:
+                raise ValueError("move_to needs position or target")
+            task_id = agent.move_to(target=target, auto_brake=as_bool(spec.get("auto_brake"), True))
+        elif action == "move_along":
+            if "waypoints" in spec:
+                target = [vector3(waypoint, "waypoint") for waypoint in spec.get("waypoints", [])]
+            else:
+                target = action_target(spec)
+            if not target:
+                raise ValueError("move_along needs waypoints or target")
+            task_id = agent.move_along(
+                target=target,
+                start_from_closest_point=as_bool(spec.get("start_from_closest_point"), False),
+                auto_brake=as_bool(spec.get("auto_brake"), True),
+            )
+        elif action == "follow":
+            target = action_target(spec)
+            if target is None:
+                raise ValueError("follow needs target or target_character")
+            task_id = agent.follow(target=target, distance=float(spec.get("distance", -1.0)))
+        elif action == "dodge":
+            task_id = agent.dodge(
+                direction=vector3(spec.get("direction", [1.0, 0.0, 0.0]), "direction"),
+                motion_scale=float(spec.get("motion_scale", 1.0)),
+            )
+        elif action == "fall":
+            task_id = agent.fall()
+        elif action == "sit":
+            target_spec = spec.get("target", spec.get("prim", ""))
+            return (*start_behavior_sit(character_name, target_spec, log_prefix=label), False)
+        elif action == "ride":
+            target = action_target(spec)
+            if target is None:
+                raise ValueError("ride needs target")
+            task_id = agent.ride(target=target)
+        elif action == "pickup_object":
+            target = action_target(spec)
+            if target is None:
+                raise ValueError("pickup_object needs target")
+            task_id = agent.pickup_object(target, snap_to_hand=as_bool(spec.get("snap_to_hand"), False))
+        elif action == "place_object":
+            target = resolve_target(spec.get("target"))
+            placement_target = resolve_target(spec.get("placement_target"))
+            if target is None or placement_target is None:
+                raise ValueError("place_object needs target and placement_target")
+            task_id = agent.place_object(target, placement_target)
+        elif action == "release_object":
+            target = action_target(spec)
+            if target is None:
+                raise ValueError("release_object needs target")
+            task_id = agent.release_object(target)
+        elif action == "custom_action":
+            name = str(spec.get("name", "")).strip()
+            if not name:
+                raise ValueError("custom_action needs name")
+            duration = optional_duration(spec)
+            root_animation = behavior_root_animation(spec.get("root_animation"))
+            kwargs = {}
+            if duration is not None:
+                kwargs["duration"] = duration
+            if root_animation is not None:
+                kwargs["root_animation"] = root_animation
+            try:
+                task_id = agent.custom_action(name, **kwargs)
+            except TypeError:
+                kwargs.pop("root_animation", None)
+                task_id = agent.custom_action(name, **kwargs)
+        elif action == "look_at":
+            target = action_target(spec)
+            if target is None:
+                raise ValueError("look_at needs target, target_character, or position")
+            task_id = call_with_optional_duration(agent.look_at, optional_duration(spec), target=target)
+        elif action == "reach_hand":
+            target = action_target(spec)
+            if target is None:
+                raise ValueError("reach_hand needs target, target_character, or position")
+            kwargs = {
+                "hand_usage": behavior_hand_usage(spec.get("hand", spec.get("hand_usage", "right"))),
+                "target": target,
+            }
+            if spec.get("palm_direction") is not None:
+                kwargs["palm_direction"] = vector3(spec["palm_direction"], "palm_direction")
+            if spec.get("finger_direction") is not None:
+                kwargs["finger_direction"] = vector3(spec["finger_direction"], "finger_direction")
+            if spec.get("motion_scale") is not None:
+                kwargs["motion_scale"] = float(spec["motion_scale"])
+            task_id = call_with_optional_duration(agent.reach_hand, optional_duration(spec), **kwargs)
+        elif action == "pose_hand":
+            kwargs = {
+                "hand_usage": behavior_hand_usage(spec.get("hand", spec.get("hand_usage", "right"))),
+                "preset": behavior_hand_pose(spec.get("preset", "relaxed")),
+            }
+            task_id = call_with_optional_duration(agent.pose_hand, optional_duration(spec), **kwargs)
+        elif action == "reset":
+            target = action_target(spec)
+            kwargs = {}
+            if target is not None:
+                kwargs["target"] = target
+            facing = facing_direction(spec.get("facing"))
+            if facing is not None:
+                kwargs["facing"] = facing
+            agent.reset(**kwargs)
+            print(f"[people_control_test] reset applied: character={character_name}")
+            return agent, None, True
+        elif action == "teleport":
+            target = action_target(spec)
+            if target is None:
+                raise ValueError("teleport needs position or target")
+            kwargs = {"target": target}
+            facing = facing_direction(spec.get("facing"))
+            if facing is not None:
+                kwargs["facing"] = facing
+            agent.teleport(**kwargs)
+            print(f"[people_control_test] teleport applied: character={character_name}")
+            return agent, None, True
+        else:
+            print(f"[people_control_test] No handler implemented for action: {action}")
+            return None, None, False
+    except Exception as exc:
+        print(f"[people_control_test] {label} failed for {character_name}: {exc}")
+        print(traceback.format_exc(limit=4).rstrip())
+        return None, None, False
+
+    invalid_task_id = behavior_task_id_invalid()
+    if task_id == invalid_task_id:
+        print(f"[people_control_test] {label} rejected for {character_name}: action={action}")
+        return None, None, False
+
+    print(f"[people_control_test] {label} started: character={character_name}, action={action}, task_id={task_id}")
+    return agent, task_id, False
 
 
 def move_character_to_xy(character_name: str, x: float, y: float, yaw_degrees: float = 0.0) -> None:
@@ -740,130 +1223,309 @@ class PlanNode:
         pass
 
 
-class CommandNode(PlanNode):
-    def __init__(self, command: str):
-        self.command = str(command)
+def legacy_command_to_action(command_text: str) -> dict | None:
+    command_text = normalize_command_line(command_text)
+
+    goto = parse_goto_command(command_text)
+    if goto is not None:
+        return {
+            "character": goto["character"],
+            "action": "move_to",
+            "position": [goto["x"], goto["y"], goto["z"]],
+            "yaw": goto["yaw"],
+        }
+
+    sit = parse_sit_command(command_text)
+    if sit is not None:
+        spec = {"character": sit["character"], "action": "sit", "target": {"prim": sit["target"]}}
+        if sit["duration"] > 0.0:
+            spec["duration"] = sit["duration"]
+        return spec
+
+    idle = parse_idle_command(command_text)
+    if idle is not None:
+        spec = {"character": idle["character"], "action": "idle"}
+        if idle["duration"] > 0.0:
+            spec["duration"] = idle["duration"]
+        return spec
+
+    parts = command_text.split()
+    if len(parts) >= 2:
+        command = parts[1].lower()
+        if command in {"lookaround", "look_around"}:
+            spec = {"character": parts[0], "action": "look_around"}
+            if len(parts) >= 3:
+                spec["duration"] = float(parts[2])
+            return spec
+        if command in {"talk", "talkwith", "talk_with"} and len(parts) >= 3:
+            spec = {
+                "character": parts[0],
+                "action": "talk_with" if command in {"talkwith", "talk_with"} else "talk",
+                "target_character": parts[2],
+            }
+            if len(parts) >= 4:
+                spec["duration"] = float(parts[3])
+            return spec
+        if command == "fall":
+            return {"character": parts[0], "action": "fall"}
+
+    return None
+
+
+class ActionNode(PlanNode):
+    def __init__(self, spec: dict):
+        self.raw_spec = dict(spec)
+        self.spec = {}
         self.started = False
         self.started_at = None
-        self.expected_command_name = ""
-        self.command_text = ""
+        self.action = ""
         self.behavior_agent = None
         self.behavior_task_id = None
-        self.uses_behavior_agent = False
-        self.duration = -1.0
+        self.duration = None
+        self.cancel_requested = False
 
     def tick(self, controller) -> bool:
         if not self.started:
-            self.command_text = controller.render_command(self.command)
-            agent_name = command_agent_name(self.command_text)
+            self.spec = controller.render_action(self.raw_spec)
+            self.action = action_name(self.spec)
+            agent_name = str(self.spec.get("character") or controller.character_name).strip()
             if agent_name and agent_name != controller.character_name:
                 print(
-                    f"[people_control_test] {controller.character_name} controller received command for {agent_name}; releasing."
+                    f"[people_control_test] {controller.character_name} controller received action for {agent_name}; releasing."
                 )
                 controller.released = True
                 return True
 
-            self.expected_command_name = command_type(self.command_text)
-            print(f"[people_control_test] {controller.character_name} -> {self.command_text}")
-
-            goto = parse_goto_command(self.command_text)
-            if goto is not None:
-                self.behavior_agent, self.behavior_task_id = start_behavior_goto(
-                    goto["character"],
-                    goto["x"],
-                    goto["y"],
-                    goto["z"],
-                    goto["yaw"],
-                    log_prefix="Patrol GoTo",
-                )
-                self.uses_behavior_agent = True
-                self.started = True
-                self.started_at = time.monotonic()
-                if self.behavior_agent is None or self.behavior_task_id is None:
-                    print(
-                        "[people_control_test] Patrol command could not start; "
-                        f"releasing {controller.character_name} controller."
-                    )
-                    controller.released = True
-                    return True
-                return False
-
-            sit = parse_sit_command(self.command_text)
-            if sit is not None:
-                self.behavior_agent, self.behavior_task_id = start_behavior_sit(
-                    sit["character"],
-                    sit["target"],
-                    log_prefix="Sit",
-                )
-                self.uses_behavior_agent = True
-                self.duration = sit["duration"]
-                self.started = True
-                self.started_at = time.monotonic()
-                if self.behavior_agent is None or self.behavior_task_id is None:
-                    print(
-                        "[people_control_test] Sit command could not start; "
-                        f"releasing {controller.character_name} controller."
-                    )
-                    controller.released = True
-                    return True
-                return False
-
-            idle = parse_idle_command(self.command_text)
-            if idle is not None:
-                self.behavior_agent, self.behavior_task_id = start_behavior_idle(
-                    idle["character"],
-                    log_prefix="Idle",
-                )
-                self.uses_behavior_agent = True
-                self.duration = idle["duration"]
-                self.started = True
-                self.started_at = time.monotonic()
-                if self.behavior_agent is None or self.behavior_task_id is None:
-                    print(
-                        "[people_control_test] Idle command could not start; "
-                        f"releasing {controller.character_name} controller."
-                    )
-                    controller.released = True
-                    return True
-                return False
-
-            print(
-                "[people_control_test] Unsupported Isaac 6 command; "
-                f"releasing {controller.character_name}: {self.command_text}"
+            self.spec["character"] = controller.character_name
+            self.duration = optional_duration(self.spec)
+            print(f"[people_control_test] {controller.character_name} -> action={self.action}")
+            self.behavior_agent, self.behavior_task_id, completed = start_behavior_action(
+                controller.character_name,
+                self.spec,
+                log_prefix=self.action,
             )
-            controller.released = True
             self.started = True
             self.started_at = time.monotonic()
-            return True
-
-        if self.uses_behavior_agent:
-            if self.behavior_agent is None or self.behavior_task_id is None:
+            if completed:
                 return True
-            if self.duration > 0.0 and self.started_at is not None:
-                if time.monotonic() - self.started_at >= self.duration:
-                    self.cancel()
-                    return True
-            return not self.behavior_agent.is_task_running(self.behavior_task_id)
+            if self.behavior_agent is None or self.behavior_task_id is None:
+                controller.released = True
+                return True
+            return False
 
-        return True
+        if self.cancel_requested:
+            return not task_is_running(self.behavior_agent, self.behavior_task_id)
+
+        if self.duration is not None and self.duration > 0.0 and self.started_at is not None:
+            if time.monotonic() - self.started_at < self.duration:
+                return False
+            self.cancel()
+            self.cancel_requested = True
+            return False
+        return not task_is_running(self.behavior_agent, self.behavior_task_id)
 
     def status(self) -> str:
-        command = self.expected_command_name or command_type(self.command)
-        if self.uses_behavior_agent and self.behavior_agent is not None and self.behavior_task_id is not None:
+        if self.behavior_agent is not None and self.behavior_task_id is not None:
             try:
                 status = self.behavior_agent.get_task_status(self.behavior_task_id)
-                return f"behavior={command}, status={status}"
+                return f"behavior={self.action}, status={status}"
             except Exception:
-                return f"behavior={command}"
-        return f"command={command}" if command else "command"
+                return f"behavior={self.action}"
+        return f"action={self.action}" if self.action else "action"
 
     def cancel(self) -> None:
-        if self.uses_behavior_agent and self.behavior_agent is not None and self.behavior_task_id is not None:
-            try:
-                if self.behavior_agent.is_task_running(self.behavior_task_id):
-                    self.behavior_agent.cancel_task(self.behavior_task_id)
-            except Exception as exc:
-                print(f"[people_control_test] Unable to cancel behavior task {self.behavior_task_id}: {exc}")
+        cancel_task(self.behavior_agent, self.behavior_task_id)
+
+
+class CommandNode(PlanNode):
+    def __init__(self, command: str):
+        self.command = str(command)
+        self.child: PlanNode | None = None
+        self.command_text = ""
+
+    def tick(self, controller) -> bool:
+        if self.child is None:
+            self.command_text = controller.render_command(self.command)
+            spec = legacy_command_to_action(self.command_text)
+            if spec is None:
+                print(f"[people_control_test] Unsupported legacy command; releasing {controller.character_name}: {self.command_text}")
+                controller.released = True
+                return True
+            self.child = make_plan_node(spec)
+        return self.child.tick(controller)
+
+    def status(self) -> str:
+        if self.child is None:
+            return f"legacy={command_type(self.command)}"
+        return self.child.status()
+
+    def cancel(self) -> None:
+        if self.child is not None:
+            self.child.cancel()
+
+
+class LookAroundNode(PlanNode):
+    def __init__(self, spec: dict):
+        self.raw_spec = dict(spec)
+        self.spec = {}
+        self.started_at = None
+        self.next_look_at = 0.0
+        self.duration = None
+        self.interval = LOOK_AROUND_DEFAULT_INTERVAL
+        self.radius = LOOK_AT_DEFAULT_RADIUS
+        self.behavior_agent = None
+        self.behavior_task_id = None
+
+    def tick(self, controller) -> bool:
+        now = time.monotonic()
+        if self.started_at is None:
+            self.spec = controller.render_action(self.raw_spec)
+            self.duration = optional_duration(self.spec, LOOK_AT_DEFAULT_DURATION)
+            self.interval = float(self.spec.get("interval", LOOK_AROUND_DEFAULT_INTERVAL))
+            self.radius = float(self.spec.get("radius", LOOK_AT_DEFAULT_RADIUS))
+            self.started_at = now
+            self.next_look_at = 0.0
+
+        if self.duration is not None and self.duration > 0.0 and now - self.started_at >= self.duration:
+            self.cancel()
+            return True
+
+        if now >= self.next_look_at:
+            self.behavior_agent, _path = get_behavior_agent(controller.character_name)
+            if self.behavior_agent is None:
+                print(f"[people_control_test] look_around behavior agent is not ready for {controller.character_name}.")
+                controller.released = True
+                return True
+
+            target = random_look_at_target(self.behavior_agent, self.radius, LOOK_AT_DEFAULT_HEIGHT)
+            if target is not None:
+                look_duration = max(0.1, min(self.interval + 0.2, self.duration or self.interval + 0.2))
+                try:
+                    self.behavior_task_id = self.behavior_agent.look_at(target=target, duration=look_duration)
+                except Exception as exc:
+                    print(f"[people_control_test] look_around failed for {controller.character_name}: {exc}")
+            self.next_look_at = now + max(0.1, self.interval)
+
+        return False
+
+    def status(self) -> str:
+        if self.started_at is None or self.duration is None:
+            return "look_around"
+        if self.duration <= 0.0:
+            return "look_around=forever"
+        remaining = max(0.0, self.duration - (time.monotonic() - self.started_at))
+        return f"look_around={remaining:.1f}s"
+
+    def cancel(self) -> None:
+        cancel_task(self.behavior_agent, self.behavior_task_id)
+
+
+class TalkOverlayNode(PlanNode):
+    def __init__(self, spec: dict):
+        self.raw_spec = dict(spec)
+        self.spec = {}
+        self.started_at = None
+        self.next_gesture_at = 0.0
+        self.gesture_index = 0
+        self.duration = TALK_DEFAULT_DURATION
+        self.interval = TALK_DEFAULT_INTERVAL
+        self.sequence = list(TALK_DEFAULT_GESTURES)
+        self.hand = "right"
+        self.target_character = ""
+        self.source_agent = None
+        self.target_agent = None
+        self.task_ids: list[tuple[object, int]] = []
+
+    def _start_task(self, agent, task_id) -> None:
+        if task_id is not None and task_id != behavior_task_id_invalid():
+            self.task_ids.append((agent, task_id))
+
+    def _start_look_at(self, source_name: str, target_name: str, duration: float) -> None:
+        source_agent, _source_path = get_behavior_agent(source_name)
+        target_path = character_target_path(target_name)
+        if source_agent is None or target_path is None:
+            return
+        try:
+            self._start_task(source_agent, source_agent.look_at(target=target_path, duration=duration))
+        except Exception as exc:
+            print(f"[people_control_test] talk look_at failed for {source_name} -> {target_name}: {exc}")
+
+    def _start_pose(self, agent, preset: str) -> None:
+        try:
+            self._start_task(
+                agent,
+                agent.pose_hand(
+                    hand_usage=behavior_hand_usage(self.hand),
+                    preset=behavior_hand_pose(preset),
+                    duration=max(0.1, self.interval),
+                ),
+            )
+        except Exception as exc:
+            print(f"[people_control_test] talk pose_hand failed: {exc}")
+
+    def tick(self, controller) -> bool:
+        now = time.monotonic()
+        if self.started_at is None:
+            self.spec = controller.render_action(self.raw_spec)
+            self.target_character = str(self.spec.get("target_character", self.spec.get("target", ""))).strip()
+            if not self.target_character:
+                print(f"[people_control_test] talk requested without target_character for {controller.character_name}.")
+                controller.released = True
+                return True
+
+            gesture = self.spec.get("gesture", {}) if isinstance(self.spec.get("gesture"), dict) else {}
+            self.hand = str(gesture.get("hand", self.spec.get("hand", "right")))
+            self.sequence = list(gesture.get("sequence", self.spec.get("sequence", TALK_DEFAULT_GESTURES)))
+            if not self.sequence:
+                self.sequence = list(TALK_DEFAULT_GESTURES)
+            self.interval = float(gesture.get("interval", self.spec.get("interval", TALK_DEFAULT_INTERVAL)))
+            self.duration = optional_duration(self.spec, TALK_DEFAULT_DURATION)
+            self.source_agent, _source_path = get_behavior_agent(controller.character_name)
+            self.target_agent, _target_path = get_behavior_agent(self.target_character)
+            if self.source_agent is None or self.target_agent is None:
+                print(
+                    f"[people_control_test] talk behavior agent is not ready: "
+                    f"{controller.character_name} -> {self.target_character}"
+                )
+                controller.released = True
+                return True
+
+            look_duration = self.duration if self.duration and self.duration > 0.0 else self.interval * 2.0
+            self._start_look_at(controller.character_name, self.target_character, look_duration)
+            self._start_look_at(self.target_character, controller.character_name, look_duration)
+            self.started_at = now
+            self.next_gesture_at = 0.0
+            print(
+                f"[people_control_test] talk overlay started: "
+                f"{controller.character_name} <-> {self.target_character}, hand={self.hand}, sequence={self.sequence}"
+            )
+
+        if self.duration is not None and self.duration > 0.0 and now - self.started_at >= self.duration:
+            self.cancel()
+            return True
+
+        if now >= self.next_gesture_at:
+            preset = str(self.sequence[self.gesture_index % len(self.sequence)])
+            self._start_pose(self.source_agent, preset)
+            self._start_pose(self.target_agent, preset)
+            self.gesture_index += 1
+            self.next_gesture_at = now + max(0.1, self.interval)
+
+        self.task_ids = [(agent, task_id) for agent, task_id in self.task_ids if task_is_running(agent, task_id)]
+        return False
+
+    def status(self) -> str:
+        if self.started_at is None:
+            return "talk"
+        if self.duration is None or self.duration <= 0.0:
+            return f"talk={self.target_character}"
+        remaining = max(0.0, self.duration - (time.monotonic() - self.started_at))
+        return f"talk={self.target_character}, {remaining:.1f}s"
+
+    def cancel(self) -> None:
+        for agent, task_id in self.task_ids:
+            cancel_task(agent, task_id)
+        self.task_ids.clear()
 
 
 class WaitNode(PlanNode):
@@ -889,13 +1551,14 @@ class SequenceNode(PlanNode):
         self.index = 0
 
     def tick(self, controller) -> bool:
-        while self.index < len(self.children):
-            if not self.children[self.index].tick(controller):
-                return False
-            if controller.released:
-                return True
-            self.index += 1
-        return True
+        if self.index >= len(self.children):
+            return True
+        if not self.children[self.index].tick(controller):
+            return False
+        if controller.released:
+            return True
+        self.index += 1
+        return self.index >= len(self.children)
 
     def status(self) -> str:
         if not self.children:
@@ -968,6 +1631,56 @@ def make_plan_node(spec) -> PlanNode:
     if not isinstance(spec, dict):
         return PlanNode()
 
+    if "repeat" in spec and action_name(spec) not in {"repeat", "patrol"}:
+        repeated_spec = dict(spec)
+        repeat_count = repeated_spec.pop("repeat")
+        return RepeatNode(repeated_spec, repeat_count)
+
+    action = action_name(spec)
+    if action == "wait":
+        return WaitNode(spec.get("seconds", spec.get("duration", 0.0)))
+    if action == "repeat":
+        child_spec = spec.get("child")
+        if child_spec is None:
+            child_spec = {"steps": spec.get("steps", [])} if "steps" in spec else spec.get("action_spec", {})
+        return RepeatNode(child_spec, spec.get("count", spec.get("repeat", 1)))
+    if action == "patrol":
+        points = spec.get("points", spec.get("waypoints", []))
+        steps = []
+        for point in points:
+            if isinstance(point, dict):
+                move_step = {
+                    "character": spec.get("character"),
+                    "action": "move_to",
+                    "position": point.get("position", point.get("target", point)),
+                    "yaw": point.get("yaw", spec.get("yaw", 0.0)),
+                    "auto_brake": point.get("auto_brake", spec.get("auto_brake", True)),
+                }
+                steps.append(move_step)
+                if point.get("wait") is not None or point.get("seconds") is not None:
+                    steps.append({"action": "wait", "seconds": point.get("wait", point.get("seconds", 0.0))})
+            else:
+                steps.append(
+                    {
+                        "character": spec.get("character"),
+                        "action": "move_to",
+                        "position": point,
+                        "yaw": spec.get("yaw", 0.0),
+                        "auto_brake": spec.get("auto_brake", True),
+                    }
+                )
+        patrol_plan = {"steps": steps}
+        return RepeatNode(patrol_plan, spec.get("count", spec.get("repeat", "forever")))
+    if action == "look_around":
+        return LookAroundNode(spec)
+    if action in {"talk", "talk_with"}:
+        return TalkOverlayNode(spec)
+    if action in NATIVE_ACTIONS:
+        return ActionNode(spec)
+
+    if "steps" in spec and not spec.get("type"):
+        return SequenceNode([make_plan_node(step) for step in spec.get("steps", [])])
+
     node_type = str(spec.get("type", "")).lower()
     if not node_type:
         if "command" in spec:
@@ -1017,6 +1730,12 @@ class CharacterController:
         variables = dict(self.variables)
         variables.setdefault("character", self.character_name)
         return normalize_command_line(format_template(command, variables))
+
+    def render_action(self, spec: dict) -> dict:
+        variables = dict(self.variables)
+        variables.setdefault("character", self.character_name)
+        rendered = render_templates(spec, variables)
+        return rendered if isinstance(rendered, dict) else {}
 
     def tick(self) -> bool:
         if self.released:
@@ -1078,8 +1797,19 @@ class ScenarioRunner:
             return
 
         self.label = label
-        for character_name, plan_spec in character_plans.items():
-            self.replace_controller(character_name, plan_spec, variables, label)
+        for controller_key, plan_spec in character_plans.items():
+            if isinstance(plan_spec, dict) and plan_spec.get("__overlay"):
+                character_name = str(plan_spec.get("__character", controller_key))
+                self.add_controller(
+                    str(controller_key),
+                    character_name,
+                    plan_spec.get("__plan", {}),
+                    variables,
+                    f"{label} overlay",
+                    replace=False,
+                )
+            else:
+                self.add_controller(str(controller_key), str(controller_key), plan_spec, variables, label, replace=True)
         refresh_status(force_log=True)
 
     def stop_all(self) -> None:
@@ -1090,11 +1820,22 @@ class ScenarioRunner:
         if STATUS_LABEL is not None:
             STATUS_LABEL.text = "Scenario: idle"
 
-    def replace_controller(self, character_name: str, plan_spec, variables: dict, label: str) -> None:
-        old_controller = self.controllers.pop(character_name, None)
+    def add_controller(
+        self,
+        controller_key: str,
+        character_name: str,
+        plan_spec,
+        variables: dict,
+        label: str,
+        replace: bool,
+    ) -> None:
+        old_controller = self.controllers.pop(controller_key, None)
         if old_controller is not None:
             old_controller.cancel()
-        self.controllers[character_name] = CharacterController(character_name, plan_spec, variables, label)
+        self.controllers[controller_key] = CharacterController(character_name, plan_spec, variables, label)
+
+    def replace_controller(self, character_name: str, plan_spec, variables: dict, label: str) -> None:
+        self.add_controller(character_name, character_name, plan_spec, variables, label, replace=True)
 
     def tick(self) -> None:
         for character_name, controller in list(self.controllers.items()):
@@ -1107,6 +1848,9 @@ class ScenarioRunner:
         return [controller.status_line() for _, controller in sorted(self.controllers.items())]
 
     def _compile_scenario(self, scenario, variables: dict) -> dict[str, object]:
+        if isinstance(scenario, dict) and isinstance(scenario.get("actions"), list):
+            return self._compile_actions(scenario["actions"], variables)
+
         if isinstance(scenario, dict) and isinstance(scenario.get("characters"), dict):
             plans = {}
             for raw_name, plan_spec in scenario["characters"].items():
@@ -1141,6 +1885,37 @@ class ScenarioRunner:
         if len(command_names) > 1:
             print("[people_control_test] Multi-character sequence is ambiguous; use 'characters' or 'parallel'.")
         return {}
+
+    def _compile_actions(self, actions: list, variables: dict) -> dict[str, object]:
+        grouped: dict[str, list] = {}
+        overlay_plans: dict[str, object] = {}
+        for index, raw_action in enumerate(actions):
+            if not isinstance(raw_action, dict):
+                continue
+            rendered = render_templates(raw_action, variables)
+            if not isinstance(rendered, dict):
+                continue
+            character_name = str(rendered.get("character", "")).strip()
+            if not character_name:
+                print(f"[people_control_test] Structured action is missing character: {rendered}")
+                continue
+            if action_name(rendered) in {"talk", "talk_with"}:
+                overlay_plans[f"{character_name}#overlay#{index}"] = {
+                    "__overlay": True,
+                    "__character": character_name,
+                    "__plan": rendered,
+                }
+                continue
+            grouped.setdefault(character_name, []).append(rendered)
+
+        plans = {}
+        for character_name, character_actions in grouped.items():
+            if len(character_actions) == 1:
+                plans[character_name] = character_actions[0]
+            else:
+                plans[character_name] = {"steps": character_actions}
+        plans.update(overlay_plans)
+        return plans
 
     def _compile_command_list(self, commands: list[str], count, variables: dict) -> dict[str, object]:
         grouped: dict[str, list[str]] = {}
@@ -1213,8 +1988,11 @@ def run_button(button: dict, selected_character: dict, x_model, y_model, r_model
         return
     elif action == "go_to_selected":
         SCENARIO_RUNNER.stop_all()
-        variables = ui_variables(selected_character, x_model, y_model, r_model)
-        move_character_to_xy(variables["character"], variables["x"], variables["y"], variables["r"])
+        if scenario_name:
+            start_named_scenario(str(scenario_name), selected_character, x_model, y_model, r_model)
+        else:
+            variables = ui_variables(selected_character, x_model, y_model, r_model)
+            move_character_to_xy(variables["character"], variables["x"], variables["y"], variables["r"])
         return
     elif action == "stop":
         SCENARIO_RUNNER.stop_all()
